@@ -145,7 +145,7 @@ class CameraController(
     }
 
     private val manager = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    @Volatile private var latestMainCaptureResult: TotalCaptureResult? = null
+    private val latestCaptureResults = java.util.concurrent.ConcurrentHashMap<String, TotalCaptureResult>()
     private val handler = Handler(Looper.getMainLooper())
     private val cbThread = HandlerThread("cam-results").apply { start() }
     private val cbHandler = Handler(cbThread.looper)
@@ -300,16 +300,16 @@ class CameraController(
     }
 
     /**
-     * Device-reported Camera2 calibration metadata for the physical main camera (ID 0).
+     * Device-reported Camera2 calibration metadata for one selected camera.
      * This is metadata diagnostics, not a laboratory spectral sensitivity measurement.
      */
-    fun sensorDiagnosticsJson(): String {
-        val id = "0"
+    fun sensorDiagnosticsJson(id: String): String {
+        require(id in cameraIds) { "Camera $id is not available on this device" }
         val c = manager.getCameraCharacteristics(id)
         val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
-        val result = latestMainCaptureResult
+        val result = latestCaptureResults[id]
         val root = JSONObject()
-        root.put("schema", "iris-cam-main-sensor-diagnostics-v2")
+        root.put("schema", "iris-cam-camera-sensor-diagnostics-v3")
         root.put("capturedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US).format(java.util.Date()))
         root.put("device", JSONObject()
             .put("manufacturer", Build.MANUFACTURER)
@@ -321,6 +321,7 @@ class CameraController(
             .put("fingerprint", Build.FINGERPRINT))
         root.put("camera", JSONObject()
             .put("cameraId", id)
+            .put("cameraLabel", cameraLabel(id))
             .put("lensFacing", c.get(CameraCharacteristics.LENS_FACING) ?: JSONObject.NULL)
             .put("focalLengthsMm", c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.let { values ->
                 JSONArray().apply { values.forEach { put(it.toDouble()) } }
@@ -372,10 +373,10 @@ class CameraController(
             } ?: JSONObject.NULL)
             live.put("greenSplit", result.get(CaptureResult.SENSOR_GREEN_SPLIT) ?: JSONObject.NULL)
         }
-        root.put("latestMainCaptureResult", live)
+        root.put("latestSelectedCameraCaptureResult", live)
         root.put("notes", JSONArray()
             .put("Optional Camera2 metadata keys may be absent on this device.")
-            .put("Live values are from the most recently completed main-camera capture result.")
+            .put("Live values are from the most recently completed capture result while this camera ID was selected.")
             .put("This report does not measure spectral response or replace a colour-chart validation."))
         return root.toString(2)
     }
@@ -1287,7 +1288,7 @@ class CameraController(
             r: CaptureRequest,
             res: TotalCaptureResult
         ) {
-            if (cfg.cameraId == "0") latestMainCaptureResult = res
+            latestCaptureResults[cfg.cameraId] = res
             liveIso = res.get(CaptureResult.SENSOR_SENSITIVITY) ?: liveIso
             res.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let {
                 if (it > 0) {
