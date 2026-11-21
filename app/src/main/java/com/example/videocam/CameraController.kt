@@ -308,6 +308,8 @@ class CameraController(
             .put("lensShadingApplied", c.get(CameraCharacteristics.SENSOR_INFO_LENS_SHADING_APPLIED) ?: JSONObject.NULL)
             .put("baseGainFactor", c.get(CameraCharacteristics.SENSOR_BASE_GAIN_FACTOR)?.let { it.toString() } ?: JSONObject.NULL)
             .put("maxAnalogSensitivity", c.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY) ?: JSONObject.NULL)
+            .put("referenceIlluminant1", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1) ?: JSONObject.NULL)
+            .put("referenceIlluminant2", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2) ?: JSONObject.NULL)
             .put("rawCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW))
             .put("manualSensorCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
             .put("capabilityValues", JSONArray().apply { caps.forEach { put(it) } }))
