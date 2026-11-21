@@ -1,0 +1,430 @@
+{
+  "schema": "iris-cam-camera-sensor-diagnostics-v3",
+  "capturedAt": "2026-11-21T17:47:15.942+05:30",
+  "device": {
+    "manufacturer": "motorola",
+    "brand": "motorola",
+    "model": "motorola edge 50 neo",
+    "device": "vienna",
+    "androidRelease": "16",
+    "sdkInt": 36,
+    "fingerprint": "motorola\/vienna_g_sys\/vienna:16\/W1UI36H.39-25-11-4\/2734cd-58da6:user\/release-keys"
+  },
+  "camera": {
+    "cameraId": "3",
+    "cameraLabel": "Tele 2.7x (ID 3)",
+    "lensFacing": 1,
+    "focalLengthsMm": [
+      7.059999942779541
+    ],
+    "physicalSensorSizeMm": [
+      3.8399999141693115,
+      2.880000114440918
+    ],
+    "pixelArraySize": {
+      "width": 3648,
+      "height": 2736
+    },
+    "activeArray": "Rect(0, 0 - 3648, 2736)"
+  },
+  "sensor": {
+    "colorFilterArrangement": 1,
+    "whiteLevel": 1023,
+    "blackLevelPattern": [
+      64,
+      64,
+      64,
+      64
+    ],
+    "sensitivityRange": [
+      100,
+      16000
+    ],
+    "exposureTimeRangeNs": [
+      100000,
+      400000000
+    ],
+    "referenceIlluminant1": 21,
+    "referenceIlluminant2": 17,
+    "rawCapability": true,
+    "manualSensorCapability": true,
+    "capabilityValues": [
+      0,
+      1,
+      2,
+      5,
+      3,
+      6,
+      19,
+      20
+    ]
+  },
+  "calibrationMatrices": {
+    "colorTransform1": [
+      {
+        "numerator": 43699,
+        "denominator": 65536,
+        "value": 0.6667938232421875
+      },
+      {
+        "numerator": -10413,
+        "denominator": 65536,
+        "value": -0.1588897705078125
+      },
+      {
+        "numerator": -5619,
+        "denominator": 65536,
+        "value": -0.0857391357421875
+      },
+      {
+        "numerator": -18807,
+        "denominator": 32768,
+        "value": -0.573944091796875
+      },
+      {
+        "numerator": 91081,
+        "denominator": 65536,
+        "value": 1.3897857666015625
+      },
+      {
+        "numerator": 9373,
+        "denominator": 65536,
+        "value": 0.1430206298828125
+      },
+      {
+        "numerator": -2259,
+        "denominator": 16384,
+        "value": -0.13787841796875
+      },
+      {
+        "numerator": 17377,
+        "denominator": 65536,
+        "value": 0.2651519775390625
+      },
+      {
+        "numerator": 39559,
+        "denominator": 65536,
+        "value": 0.6036224365234375
+      }
+    ],
+    "colorTransform2": [
+      {
+        "numerator": 50183,
+        "denominator": 32768,
+        "value": 1.531463623046875
+      },
+      {
+        "numerator": -3847,
+        "denominator": 8192,
+        "value": -0.4696044921875
+      },
+      {
+        "numerator": -7047,
+        "denominator": 32768,
+        "value": -0.215057373046875
+      },
+      {
+        "numerator": -15605,
+        "denominator": 32768,
+        "value": -0.476226806640625
+      },
+      {
+        "numerator": 94721,
+        "denominator": 65536,
+        "value": 1.4453277587890625
+      },
+      {
+        "numerator": 439,
+        "denominator": 65536,
+        "value": 0.0066986083984375
+      },
+      {
+        "numerator": -2351,
+        "denominator": 32768,
+        "value": -0.071746826171875
+      },
+      {
+        "numerator": 15645,
+        "denominator": 65536,
+        "value": 0.2387237548828125
+      },
+      {
+        "numerator": 15267,
+        "denominator": 65536,
+        "value": 0.2329559326171875
+      }
+    ],
+    "calibrationTransform1": [
+      {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      }
+    ],
+    "calibrationTransform2": [
+      {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      }
+    ],
+    "forwardMatrix1": [
+      {
+        "numerator": 44115,
+        "denominator": 65536,
+        "value": 0.6731414794921875
+      },
+      {
+        "numerator": 6391,
+        "denominator": 32768,
+        "value": 0.195037841796875
+      },
+      {
+        "numerator": 6293,
+        "denominator": 65536,
+        "value": 0.0960235595703125
+      },
+      {
+        "numerator": 4525,
+        "denominator": 16384,
+        "value": 0.27618408203125
+      },
+      {
+        "numerator": 26811,
+        "denominator": 32768,
+        "value": 0.818206787109375
+      },
+      {
+        "numerator": -6187,
+        "denominator": 65536,
+        "value": -0.0944061279296875
+      },
+      {
+        "numerator": 1419,
+        "denominator": 65536,
+        "value": 0.0216522216796875
+      },
+      {
+        "numerator": -7617,
+        "denominator": 32768,
+        "value": -0.232452392578125
+      },
+      {
+        "numerator": 8487,
+        "denominator": 8192,
+        "value": 1.0360107421875
+      }
+    ],
+    "forwardMatrix2": [
+      {
+        "numerator": 18825,
+        "denominator": 32768,
+        "value": 0.574493408203125
+      },
+      {
+        "numerator": 12059,
+        "denominator": 65536,
+        "value": 0.1840057373046875
+      },
+      {
+        "numerator": 13481,
+        "denominator": 65536,
+        "value": 0.2057037353515625
+      },
+      {
+        "numerator": 6351,
+        "denominator": 32768,
+        "value": 0.193817138671875
+      },
+      {
+        "numerator": 48849,
+        "denominator": 65536,
+        "value": 0.7453765869140625
+      },
+      {
+        "numerator": 249,
+        "denominator": 4096,
+        "value": 0.060791015625
+      },
+      {
+        "numerator": -475,
+        "denominator": 32768,
+        "value": -0.014495849609375
+      },
+      {
+        "numerator": -4331,
+        "denominator": 8192,
+        "value": -0.5286865234375
+      },
+      {
+        "numerator": 5605,
+        "denominator": 4096,
+        "value": 1.368408203125
+      }
+    ]
+  },
+  "latestSelectedCameraCaptureResult": {
+    "available": true,
+    "sensorSensitivityIso": 913,
+    "exposureTimeNs": 20000304,
+    "colorCorrectionMode": 1,
+    "colorCorrectionTransform": [
+      {
+        "numerator": 829,
+        "denominator": 512,
+        "value": 1.619140625
+      },
+      {
+        "numerator": -75,
+        "denominator": 256,
+        "value": -0.29296875
+      },
+      {
+        "numerator": -167,
+        "denominator": 512,
+        "value": -0.326171875
+      },
+      {
+        "numerator": -37,
+        "denominator": 512,
+        "value": -0.072265625
+      },
+      {
+        "numerator": 765,
+        "denominator": 512,
+        "value": 1.494140625
+      },
+      {
+        "numerator": -27,
+        "denominator": 64,
+        "value": -0.421875
+      },
+      {
+        "numerator": -33,
+        "denominator": 512,
+        "value": -0.064453125
+      },
+      {
+        "numerator": -271,
+        "denominator": 512,
+        "value": -0.529296875
+      },
+      {
+        "numerator": 51,
+        "denominator": 32,
+        "value": 1.59375
+      }
+    ],
+    "colorCorrectionGains": [
+      2.080078125,
+      1,
+      1,
+      1.44140625
+    ],
+    "awbMode": 1,
+    "awbState": 2,
+    "neutralColorPoint": [
+      {
+        "numerator": 512,
+        "denominator": 1065,
+        "value": 0.4807511737089202
+      },
+      {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      {
+        "numerator": 256,
+        "denominator": 369,
+        "value": 0.6937669376693767
+      }
+    ],
+    "greenSplit": 0
+  },
+  "notes": [
+    "Optional Camera2 metadata keys may be absent on this device.",
+    "Live values are from the most recently completed capture result while this camera ID was selected.",
+    "This report does not measure spectral response or replace a colour-chart validation."
+  ]
+}
