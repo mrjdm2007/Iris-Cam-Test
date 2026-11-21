@@ -109,6 +109,9 @@ class CameraController(
         val blue: Boolean,
         val filterId: Int,
         val filterIntensity: Int,
+        val redChromaPercent: Int,
+        val greenChromaPercent: Int,
+        val blueChromaPercent: Int,
         val contrast: Int,
         val backgroundColorShift: Boolean,
         val backgroundHueShift: Int,
@@ -755,6 +758,9 @@ class CameraController(
                     effectId = if (cfg.filterId > 0) cfg.filterId else 0,
                     effectStrength = cfg.filterIntensity / 100f,
                     contrastStrength = (cfg.videoContrastByLens[cfg.cameraId] ?: cfg.videoContrast) / 100f,
+                    redChroma = cfg.redChromaPercent / 100f,
+                    greenChroma = cfg.greenChromaPercent / 100f,
+                    blueChroma = cfg.blueChromaPercent / 100f,
                     // Preserve incoming texture orientation; portrait is centre-cropped, not rotated.
                     portraitOutput = cfg.portrait && !cropIt
                 )
@@ -1767,7 +1773,9 @@ class CameraController(
             val sh = Shot(
                 cfg.cameraId, fmt, chars, needRotation(), cfg.photoQuality, reqs.size,
                 cfg.bw, cfg.flat && !cfg.bw, cfg.photoLook, bracket != null, false, cfg.glow, cfg.blue,
-                cfg.filterId, cfg.photoFilterIntensity, (cfg.photoContrastByLens[cfg.cameraId] ?: cfg.photoContrast).coerceIn(0, 100),
+                cfg.filterId, cfg.photoFilterIntensity,
+                cfg.redChromaPercent, cfg.greenChromaPercent, cfg.blueChromaPercent,
+                (cfg.photoContrastByLens[cfg.cameraId] ?: cfg.photoContrast).coerceIn(0, 100),
                 cfg.backgroundColorShiftEnabled, cfg.backgroundHueShift, cfg.backgroundSaturation, cfg.backgroundTemperature,
                 cfg.portraitPhotoModeEnabled, cfg.portraitBlurPercent,
                 cfg.bokehEnhancementEnabled, cfg.bokehStrength, cfg.bokehGlow, cfg.bokehShape,
@@ -1874,8 +1882,12 @@ class CameraController(
     private fun finishLook(bmp: Bitmap, sh: Shot): Bitmap {
         var out = Look.apply(bmp, sh.bw, sh.flat)
         if (out !== bmp) bmp.recycle()
-        if ((sh.filterId > 0 && sh.filterIntensity > 0) || sh.flat || sh.bw) {
-            val filtered = Look.applyPreset(out, sh.filterId, sh.filterIntensity)
+        if ((sh.filterId > 0 && sh.filterIntensity > 0) || sh.flat || sh.bw ||
+            sh.redChromaPercent != 100 || sh.greenChromaPercent != 100 || sh.blueChromaPercent != 100) {
+            val filtered = Look.applyPreset(
+                out, sh.filterId, sh.filterIntensity,
+                sh.redChromaPercent, sh.greenChromaPercent, sh.blueChromaPercent
+            )
             if (filtered !== out) {
                 out.recycle()
                 out = filtered
