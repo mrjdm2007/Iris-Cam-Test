@@ -27,6 +27,7 @@ import android.hardware.camera2.DngCreator
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.DynamicRangeProfiles
+import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
@@ -47,6 +48,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Range
+import android.util.Rational
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
@@ -55,6 +57,8 @@ import android.view.animation.LinearInterpolator
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import com.google.android.gms.tasks.Tasks
@@ -141,6 +145,7 @@ class CameraController(
     }
 
     private val manager = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    @Volatile private var latestMainCaptureResult: TotalCaptureResult? = null
     private val handler = Handler(Looper.getMainLooper())
     private val cbThread = HandlerThread("cam-results").apply { start() }
     private val cbHandler = Handler(cbThread.looper)
@@ -291,6 +296,111 @@ class CameraController(
             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
             override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
             override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+        }
+    }
+
+    /**
+     * Device-reported Camera2 calibration metadata for the physical main camera (ID 0).
+     * This is metadata diagnostics, not a laboratory spectral sensitivity measurement.
+     */
+    fun sensorDiagnosticsJson(): String {
+        val id = "0"
+        val c = manager.getCameraCharacteristics(id)
+        val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+        val result = latestMainCaptureResult
+        val root = JSONObject()
+        root.put("schema", "iris-cam-main-sensor-diagnostics-v2")
+        root.put("capturedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US).format(java.util.Date()))
+        root.put("device", JSONObject()
+            .put("manufacturer", Build.MANUFACTURER)
+            .put("brand", Build.BRAND)
+            .put("model", Build.MODEL)
+            .put("device", Build.DEVICE)
+            .put("androidRelease", Build.VERSION.RELEASE)
+            .put("sdkInt", Build.VERSION.SDK_INT)
+            .put("fingerprint", Build.FINGERPRINT))
+        root.put("camera", JSONObject()
+            .put("cameraId", id)
+            .put("lensFacing", c.get(CameraCharacteristics.LENS_FACING) ?: JSONObject.NULL)
+            .put("focalLengthsMm", c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.let { values ->
+                JSONArray().apply { values.forEach { put(it.toDouble()) } }
+            } ?: JSONObject.NULL)
+            .put("physicalSensorSizeMm", c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.let {
+                JSONArray().put(it.width.toDouble()).put(it.height.toDouble())
+            } ?: JSONObject.NULL)
+            .put("pixelArraySize", c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)?.let {
+                JSONObject().put("width", it.width).put("height", it.height)
+            } ?: JSONObject.NULL)
+            .put("activeArray", c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)?.toString() ?: JSONObject.NULL))
+        root.put("sensor", JSONObject()
+            .put("colorFilterArrangement", c.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: JSONObject.NULL)
+            .put("whiteLevel", c.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: JSONObject.NULL)
+            .put("blackLevelPattern", c.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)?.let { p ->
+                JSONArray().apply { for (i in 0..3) put(p.getOffsetForIndex(i % 2, i / 2)) }
+            } ?: JSONObject.NULL)
+            .put("sensitivityRange", c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let {
+                JSONArray().put(it.lower).put(it.upper)
+            } ?: JSONObject.NULL)
+            .put("exposureTimeRangeNs", c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
+                JSONArray().put(it.lower).put(it.upper)
+            } ?: JSONObject.NULL)
+            .put("referenceIlluminant1", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1) ?: JSONObject.NULL)
+            .put("referenceIlluminant2", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2) ?: JSONObject.NULL)
+            .put("rawCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW))
+            .put("manualSensorCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
+            .put("capabilityValues", JSONArray().apply { caps.forEach { put(it) } }))
+        root.put("calibrationMatrices", JSONObject()
+            .put("colorTransform1", transformJson(c.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1)) ?: JSONObject.NULL)
+            .put("colorTransform2", transformJson(c.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)) ?: JSONObject.NULL)
+            .put("calibrationTransform1", transformJson(c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1)) ?: JSONObject.NULL)
+            .put("calibrationTransform2", transformJson(c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2)) ?: JSONObject.NULL)
+            .put("forwardMatrix1", transformJson(c.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX1)) ?: JSONObject.NULL)
+            .put("forwardMatrix2", transformJson(c.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX2)) ?: JSONObject.NULL))
+        val live = JSONObject().put("available", result != null)
+        if (result != null) {
+            live.put("sensorSensitivityIso", result.get(CaptureResult.SENSOR_SENSITIVITY) ?: JSONObject.NULL)
+            live.put("exposureTimeNs", result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: JSONObject.NULL)
+            live.put("colorCorrectionMode", result.get(CaptureResult.COLOR_CORRECTION_MODE) ?: JSONObject.NULL)
+            live.put("colorCorrectionTransform", transformJson(result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)) ?: JSONObject.NULL)
+            live.put("colorCorrectionGains", result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let {
+                JSONArray().put(it.red.toDouble()).put(it.greenEven.toDouble()).put(it.greenOdd.toDouble()).put(it.blue.toDouble())
+            } ?: JSONObject.NULL)
+            live.put("awbMode", result.get(CaptureResult.CONTROL_AWB_MODE) ?: JSONObject.NULL)
+            live.put("awbState", result.get(CaptureResult.CONTROL_AWB_STATE) ?: JSONObject.NULL)
+            live.put("neutralColorPoint", result.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)?.let {
+                rationalArrayJson(it)
+            } ?: JSONObject.NULL)
+            live.put("greenSplit", result.get(CaptureResult.SENSOR_GREEN_SPLIT) ?: JSONObject.NULL)
+        }
+        root.put("latestMainCaptureResult", live)
+        root.put("notes", JSONArray()
+            .put("Optional Camera2 metadata keys may be absent on this device.")
+            .put("Live values are from the most recently completed main-camera capture result.")
+            .put("This report does not measure spectral response or replace a colour-chart validation."))
+        return root.toString(2)
+    }
+
+    private fun rationalArrayJson(values: Array<Rational>): JSONArray =
+        JSONArray().apply {
+            values.forEach { value ->
+                put(JSONObject()
+                    .put("numerator", value.numerator)
+                    .put("denominator", value.denominator)
+                    .put("value", value.numerator.toDouble() / value.denominator.toDouble()))
+            }
+        }
+
+    private fun transformJson(transform: ColorSpaceTransform?): JSONArray? {
+        if (transform == null) return null
+        val elements = Array(9) { Rational(0, 1) }
+        transform.copyElements(elements, 0)
+        return JSONArray().apply {
+            elements.forEach { value ->
+                put(JSONObject()
+                    .put("numerator", value.numerator)
+                    .put("denominator", value.denominator)
+                    .put("value", value.numerator.toDouble() / value.denominator.toDouble()))
+            }
         }
     }
 
@@ -1177,6 +1287,7 @@ class CameraController(
             r: CaptureRequest,
             res: TotalCaptureResult
         ) {
+            if (cfg.cameraId == "0") latestMainCaptureResult = res
             liveIso = res.get(CaptureResult.SENSOR_SENSITIVITY) ?: liveIso
             res.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let {
                 if (it > 0) {
