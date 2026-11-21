@@ -2177,17 +2177,17 @@ class MainActivity : Activity(), CameraController.Callbacks {
     }
 
     private fun exportSensorCalibrationReport() {
-        if (cfg.cameraId != "0") {
-            toast("Select Main 1x (camera ID 0) before exporting calibration data")
-            return
-        }
+        // Freeze the selected ID before background I/O so report and filename stay aligned.
+        val cameraId = cfg.cameraId
+        val cameraLabel = runCatching { cam.cameraLabel(cameraId) }.getOrDefault("Camera $cameraId")
+        val safeLabel = cameraLabel.replace(Regex("[^A-Za-z0-9_-]+"), "_").trim('_')
         Thread {
             var uri: Uri? = null
             try {
-                val json = cam.sensorDiagnosticsJson()
+                val json = cam.sensorDiagnosticsJson(cameraId)
                 val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
                     .format(java.util.Date())
-                val filename = "IrisCam_MainSensor_Calibration_$stamp.json"
+                val filename = "IrisCam_${safeLabel.ifBlank { "Camera_$cameraId" }}_ID${cameraId}_Calibration_$stamp.json"
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
                     put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
@@ -2262,7 +2262,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         },
         "Edit layout" to { setEditing(true) },
         "Phone capabilities" to { showCapabilities() },
-        "Export main sensor calibration report" to { exportSensorCalibrationReport() }
+        "Export selected lens calibration report" to { exportSensorCalibrationReport() }
     )
 
     // ---------- refresh ----------
