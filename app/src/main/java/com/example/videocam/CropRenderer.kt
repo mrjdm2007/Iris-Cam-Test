@@ -38,9 +38,9 @@ class CropRenderer(
     private val effectId: Int = 0,
     private val effectStrength: Float = 1f,
     private val contrastStrength: Float = 0.1f,
-    private val redChroma: Float = 1f,
-    private val greenChroma: Float = 1f,
-    private val blueChroma: Float = 1f,
+    @Volatile private var redChroma: Float = 1f,
+    @Volatile private var greenChroma: Float = 1f,
+    @Volatile private var blueChroma: Float = 1f,
     private val portraitOutput: Boolean = false
 ) {
     private val thread = HandlerThread("crop-gl").apply { start() }
@@ -79,6 +79,12 @@ class CropRenderer(
     /** Frames are only passed on to the recorder while this is true (set once recording has started). */
     @Volatile
     var active = false
+
+    fun updateChroma(red: Float, green: Float, blue: Float) {
+        redChroma = red.coerceIn(0f, 2f)
+        greenChroma = green.coerceIn(0f, 2f)
+        blueChroma = blue.coerceIn(0f, 2f)
+    }
 
     init {
         val latch = CountDownLatch(1)
