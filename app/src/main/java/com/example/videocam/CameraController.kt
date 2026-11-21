@@ -32,9 +32,6 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.StreamConfigurationMap
 import android.hardware.camera2.params.TonemapCurve
-import android.hardware.camera2.params.ColorSpaceTransform
-import org.json.JSONArray
-import org.json.JSONObject
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.Image
@@ -56,8 +53,15 @@ import android.view.TextureView
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
+import com.google.mlkit.vision.segmentation.subject.SubjectSegmenter
+import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
@@ -82,6 +86,7 @@ class CameraController(
         fun onStateChanged()
         fun onZoomChanged(z: Float)
         fun onBusy(busy: Boolean)
+        fun onPhotoCaptured()
         fun onPhotoSaved(uri: Uri?)
         fun onLongExposure(sec: Int)
     }
@@ -105,12 +110,25 @@ class CameraController(
         val filterId: Int,
         val filterIntensity: Int,
         val contrast: Int,
+        val backgroundColorShift: Boolean,
+        val backgroundHueShift: Int,
+        val backgroundSaturation: Int,
+        val backgroundTemperature: Int,
+        val portraitPhotoMode: Boolean,
+        val portraitBlurPercent: Int,
+        val bokehEnhancement: Boolean,
+        val bokehStrength: Int,
+        val bokehGlow: Int,
+        val bokehShape: Int,
+        val autoPortraitConfirmed: Boolean,
         val hdrFactor: Float = 1f
     ) {
         var image: Image? = null // RAW only
         var result: TotalCaptureResult? = null
         val jpegs = ArrayList<ByteArray>()
         var started = false
+        var detectedFaceCount: Int = 0
+        var completedResults: Int = 0
     }
 
     private class ScenePlan(val expNs: Long, val iso: Int, val frames: Int)
@@ -154,10 +172,26 @@ class CameraController(
     private var lastPreview = Size(1920, 1080)
     private var reader: ImageReader? = null
     private var shot: Shot? = null
-    @Volatile private var latestCaptureResult: TotalCaptureResult? = null
-    @Volatile private var latestResultCameraId: String? = null
+    @Volatile private var lastCaptureStartedAt = 0L
+    val captureCooldownActive: Boolean
+        get() = SystemClock.elapsedRealtime() - lastCaptureStartedAt < 2_000L
+
+    @Volatile
+    private var autoPortraitConsentUntilMs = 0L
+
+    fun confirmAutoPortraitForFiveMinutes() {
+        autoPortraitConsentUntilMs = SystemClock.elapsedRealtime() + 5 * 60 * 1000L
+    }
+
+    fun hasValidAutoPortraitConfirmation(): Boolean =
+        SystemClock.elapsedRealtime() < autoPortraitConsentUntilMs
     private var warnedLens: String? = null
     private val procExec = Executors.newSingleThreadExecutor()
+    private val subjectSegmenter by lazy<SubjectSegmenter> {
+        SubjectSegmentation.getClient(
+            SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build()
+        )
+    }
     private val lock = Any()
     private var crop: CropRenderer? = null
     private val jobCount = java.util.concurrent.atomic.AtomicInteger(0)
@@ -220,6 +254,9 @@ class CameraController(
     var liveIso = 0
         private set
     @Volatile
+    var liveFaceCount = 0
+        private set
+    @Volatile
     var liveShutterDenom = 0
         private set
     @Volatile
@@ -251,131 +288,6 @@ class CameraController(
             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
             override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
             override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
-        }
-    }
-
-    /**
-     * Collects Camera2 calibration metadata for the physical main camera (ID 0),
-     * plus the most recent live capture-result colour correction values.
-     * This is diagnostic output only; it does not alter camera rendering.
-     */
-    fun sensorDiagnosticsJson(): String {
-        val id = "0"
-        val c = manager.getCameraCharacteristics(id)
-        val now = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US).format(Date())
-        val root = JSONObject()
-        root.put("schema", "iris-cam-sensor-diagnostics-v1")
-        root.put("capturedAt", now)
-        root.put("device", JSONObject()
-            .put("manufacturer", Build.MANUFACTURER)
-            .put("brand", Build.BRAND)
-            .put("model", Build.MODEL)
-            .put("device", Build.DEVICE)
-            .put("androidRelease", Build.VERSION.RELEASE)
-            .put("sdkInt", Build.VERSION.SDK_INT)
-            .put("fingerprint", Build.FINGERPRINT))
-        root.put("camera", JSONObject()
-            .put("cameraId", id)
-            .put("label", "Main 1x")
-            .put("lensFacing", c.get(CameraCharacteristics.LENS_FACING))
-            .put("focalLengthsMm", jsonFloatArray(c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)))
-            .put("physicalSensorSizeMm", c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.let {
-                JSONArray().put(it.width).put(it.height)
-            } ?: JSONObject.NULL)
-            .put("pixelArraySize", c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)?.let {
-                JSONObject().put("width", it.width).put("height", it.height)
-            } ?: JSONObject.NULL)
-            .put("activeArray", c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)?.toString() ?: JSONObject.NULL)
-            .put("preCorrectionActiveArray", c.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE)?.toString() ?: JSONObject.NULL))
-        val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
-        root.put("sensor", JSONObject()
-            .put("colorFilterArrangement", c.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT))
-            .put("colorFilterArrangementName", when (c.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT)) {
-                0 -> "RGGB"; 1 -> "GRBG"; 2 -> "GBRG"; 3 -> "BGGR"; 4 -> "RGB"; 5 -> "MONO"; else -> "UNKNOWN"
-            })
-            .put("whiteLevel", c.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: JSONObject.NULL)
-            .put("blackLevelPattern", c.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)?.let { p ->
-                JSONArray().apply { for (i in 0..3) put(p.getOffsetForIndex(i % 2, i / 2)) }
-            } ?: JSONObject.NULL)
-            .put("sensitivityRange", c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let {
-                JSONArray().put(it.lower).put(it.upper)
-            } ?: JSONObject.NULL)
-            .put("exposureTimeRangeNs", c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
-                JSONArray().put(it.lower).put(it.upper)
-            } ?: JSONObject.NULL)
-            .put("maxFrameDurationNs", c.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: JSONObject.NULL)
-            .put("timestampSource", c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ?: JSONObject.NULL)
-            .put("lensShadingApplied", c.get(CameraCharacteristics.SENSOR_INFO_LENS_SHADING_APPLIED) ?: JSONObject.NULL)
-            .put("maxAnalogSensitivity", c.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY) ?: JSONObject.NULL)
-            .put("referenceIlluminant1", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1) ?: JSONObject.NULL)
-            .put("referenceIlluminant2", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2) ?: JSONObject.NULL)
-            .put("rawCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW))
-            .put("manualSensorCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
-            .put("capabilityValues", JSONArray().apply { caps.forEach { put(it) } }))
-        val matrices = JSONObject()
-        matrices.put("colorTransform1", transformJson(c.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1)) ?: JSONObject.NULL)
-        matrices.put("colorTransform2", transformJson(c.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)) ?: JSONObject.NULL)
-        matrices.put("calibrationTransform1", transformJson(c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1)) ?: JSONObject.NULL)
-        matrices.put("calibrationTransform2", transformJson(c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2)) ?: JSONObject.NULL)
-        matrices.put("forwardMatrix1", transformJson(c.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX1)) ?: JSONObject.NULL)
-        matrices.put("forwardMatrix2", transformJson(c.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX2)) ?: JSONObject.NULL)
-        root.put("calibrationMatrices", matrices)
-        val live = JSONObject()
-        val result = latestCaptureResult.takeIf { latestResultCameraId == id }
-        live.put("available", result != null)
-        if (result != null) {
-            live.put("sensorSensitivityIso", result.get(CaptureResult.SENSOR_SENSITIVITY) ?: JSONObject.NULL)
-            live.put("exposureTimeNs", result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: JSONObject.NULL)
-            live.put("frameDurationNs", result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: JSONObject.NULL)
-            live.put("sensorTimestampNs", result.get(CaptureResult.SENSOR_TIMESTAMP) ?: JSONObject.NULL)
-            live.put("colorCorrectionMode", result.get(CaptureResult.COLOR_CORRECTION_MODE) ?: JSONObject.NULL)
-            live.put("colorCorrectionTransform", transformJson(result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)) ?: JSONObject.NULL)
-            live.put("colorCorrectionGains", result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let {
-                JSONArray().put(it.getRed()).put(it.getGreenEven()).put(it.getGreenOdd()).put(it.getBlue())
-            } ?: JSONObject.NULL)
-            live.put("awbMode", result.get(CaptureResult.CONTROL_AWB_MODE) ?: JSONObject.NULL)
-            live.put("awbState", result.get(CaptureResult.CONTROL_AWB_STATE) ?: JSONObject.NULL)
-            live.put("neutralColorPoint", result.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)?.let {
-                rationalArrayJson(it)
-            } ?: JSONObject.NULL)
-            live.put("dynamicBlackLevel", result.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)?.let {
-                JSONArray().apply { it.forEach { value -> put(value.toDouble()) } }
-            } ?: JSONObject.NULL)
-            live.put("dynamicWhiteLevel", result.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL) ?: JSONObject.NULL)
-            live.put("greenSplit", result.get(CaptureResult.SENSOR_GREEN_SPLIT) ?: JSONObject.NULL)
-        }
-        root.put("latestCaptureResult", live)
-        root.put("notes", JSONArray()
-            .put("Camera2 characteristics are device-reported metadata, not a laboratory spectral sensitivity measurement.")
-            .put("The live capture-result section reflects the latest completed main-camera preview frame when available.")
-            .put("No colour correction or creative look is applied by this diagnostic export."))
-        return root.toString(2)
-    }
-
-    private fun jsonFloatArray(values: FloatArray?): JSONArray =
-        JSONArray().apply { values?.forEach { put(it.toDouble()) } }
-
-    private fun rationalArrayJson(values: Array<android.util.Rational>): JSONArray =
-        JSONArray().apply {
-            values.forEach { value ->
-                put(JSONObject()
-                    .put("numerator", value.numerator)
-                    .put("denominator", value.denominator)
-                    .put("value", value.numerator.toDouble() / value.denominator.toDouble()))
-            }
-        }
-
-    private fun transformJson(transform: ColorSpaceTransform?): JSONArray? {
-        if (transform == null) return null
-        val elements = Array(9) { android.util.Rational(0, 1) }
-        transform.copyElements(elements, 0)
-        return JSONArray().apply {
-            elements.forEach { value ->
-                put(JSONObject()
-                    .put("numerator", value.numerator)
-                    .put("denominator", value.denominator)
-                    .put("value", value.numerator.toDouble() / value.denominator.toDouble()))
-            }
         }
     }
 
@@ -576,7 +488,7 @@ class CameraController(
     fun shutterOptions(): List<Int> {
         val er = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         if (cfg.mode == 1) {
-            return listOf(1, 2, 4, 8, 15, 30, 60, 100, 125, 250, 500, 1000, 2000, 4000, 8000).filter { d ->
+            return listOf(1, 2, 4, 8, 15, 20, 30, 60, 100, 125, 250, 500, 1000, 2000, 4000, 8000).filter { d ->
                 val ns = 1e9 / d
                 er == null || (ns >= er.lower && ns <= er.upper)
             }
@@ -806,7 +718,12 @@ class CameraController(
             rec.setVideoFrameRate(cfg.fps)
             val os = outSize()
             val cropIt = effRatio() > 0
-            rec.setVideoSize(os.width, os.height)
+            // When GL is active in portrait mode, rotate the camera's landscape buffer
+            // into a real portrait-sized encoder surface. Do not depend on MP4 rotation
+            // metadata: some playback/inspection paths ignore it for Surface-input recordings.
+            val useGlRenderer = cropIt || cfg.filterId > 0
+            val recorderSize = if (cfg.portrait && useGlRenderer) Size(cfg.height, cfg.width) else os
+            rec.setVideoSize(recorderSize.width, recorderSize.height)
             rec.setVideoEncoder(
                 if (cfg.hevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264
             )
@@ -816,10 +733,9 @@ class CameraController(
                 rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 findMic()?.let { rec.setPreferredDevice(it) }
             }
-            // The GL renderer writes physically upright frames, so don't add rotation metadata.
-            // Without the renderer, let MediaRecorder carry the device orientation as metadata.
-            val useGlRenderer = cropIt || cfg.filterId > 0 || cfg.portrait
-            rec.setOrientationHint(if (useGlRenderer) 0 else orientationHint())
+            // GL portrait output is physically upright and already has portrait dimensions.
+            // Keep metadata at zero to prevent players applying a second rotation.
+            rec.setOrientationHint(if (cropIt || (cfg.portrait && useGlRenderer)) 0 else orientationHint())
             rec.setMaxFileSize(SPLIT_BYTES)
             rec.setOnInfoListener { mr, what, _ -> onRecorderInfo(mr, what) }
             rec.setOnErrorListener { mr, what, extra ->
@@ -830,16 +746,17 @@ class CameraController(
             }
             rec.prepare()
             recorder = rec
-            if (cropIt || cfg.filterId > 0 || cfg.portrait) {
+            if (useGlRenderer) {
                 val rot = tv.display?.rotation ?: Surface.ROTATION_90
                 val matrix = if (cfg.filterId > 0) Look.videoFilterMatrix(cfg.filterId, cfg.filterIntensity) else null
                 crop = CropRenderer(
-                    rec.surface, os.width, os.height, cfg.width, cfg.height, rot,
+                    rec.surface, recorderSize.width, recorderSize.height, cfg.width, cfg.height, rot,
                     fullFrame = !cropIt, filterMatrix = matrix,
                     effectId = if (cfg.filterId > 0) cfg.filterId else 0,
                     effectStrength = cfg.filterIntensity / 100f,
-                    portraitOutput = cfg.portrait,
-                    portraitRotationDegrees = orientationHint()
+                    contrastStrength = (cfg.videoContrastByLens[cfg.cameraId] ?: cfg.videoContrast) / 100f,
+                    // Preserve incoming texture orientation; portrait is centre-cropped, not rotated.
+                    portraitOutput = cfg.portrait && !cropIt
                 )
             }
         } catch (e: Exception) {
@@ -1239,7 +1156,7 @@ class CameraController(
         }
 
         // ----- face detection for face-priority AF -----
-        if (cfg.faceAf && faceAfSupported) {
+        if ((cfg.faceAf || cfg.mode == 1) && faceAfSupported) {
             b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE)
         }
 
@@ -1254,8 +1171,6 @@ class CameraController(
             r: CaptureRequest,
             res: TotalCaptureResult
         ) {
-            latestCaptureResult = res
-            latestResultCameraId = cfg.cameraId
             liveIso = res.get(CaptureResult.SENSOR_SENSITIVITY) ?: liveIso
             res.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let {
                 if (it > 0) {
@@ -1264,6 +1179,7 @@ class CameraController(
                 }
             }
             liveFocus = res.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: -1f
+            liveFaceCount = res.get(CaptureResult.STATISTICS_FACES)?.size ?: 0
             if (!(cfg.faceAf && faceAfSupported)) return
             val now = SystemClock.elapsedRealtime()
             if (now - last < 400) return
@@ -1334,7 +1250,8 @@ class CameraController(
         // JPEG_R must be saved byte-for-byte to preserve its gain map. If a pixel filter
         // is selected, use ordinary JPEG so the requested look is actually rendered.
         cfg.photoFormat == 3 && ultraHdrAvailable &&
-            cfg.filterId == 0 && !cfg.flat -> ImageFormat.JPEG_R
+            cfg.filterId == 0 && !cfg.flat && !cfg.backgroundColorShiftEnabled &&
+            !cfg.portraitPhotoModeEnabled && !cfg.bokehEnhancementEnabled -> ImageFormat.JPEG_R
         else -> ImageFormat.JPEG
     }
 
@@ -1351,13 +1268,9 @@ class CameraController(
         if (l.isEmpty()) return Size(4000, 3000)
         l.firstOrNull { it.width == cfg.photoW && it.height == cfg.photoH }?.let { return it }
         if (effMode() == 1 || captureFormat() == ImageFormat.JPEG_R) return l.first()
-        // Default to a fast ~8 MP 4:3 capture and save at that exact pixel size.
-        val target = min(8_000_000L, lensSafeArea)
-        val ok = l.filter { it.width.toLong() * it.height <= target }
-        return ok.firstOrNull { it.width * 3 == it.height * 4 }
-            ?: ok.firstOrNull()
-            ?: l.minByOrNull { kotlin.math.abs(it.width.toLong() * it.height - 8_000_000L) }
-            ?: l.last()
+        // Default to the largest JPEG size reported by the currently selected lens.
+        // Explicit user-selected dimensions above continue to take precedence.
+        return l.first()
     }
 
     private fun previewSizeForPhoto(cap: Size): Size {
@@ -1437,6 +1350,8 @@ class CameraController(
         }
     }
 
+    private fun photoManualExposure(): Boolean = cfg.photoExposureMode == 2
+
     private fun applyPhotoControls(b: CaptureRequest.Builder, capture: Boolean) {
         if (Build.VERSION.SDK_INT >= 23 && cfg.chromaticAberrationCorrection) {
             // Request real lateral chromatic-aberration correction from the camera ISP.
@@ -1473,7 +1388,7 @@ class CameraController(
 
         // exposure and flash
         val flash = capture && flashAvail && cfg.flashMode != 0
-        if (cfg.manualExposure) {
+        if (photoManualExposure()) {
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
             var ns = (1e9 / cfg.shutterDenom).toLong()
             chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let { ns = ns.coerceIn(it.lower, it.upper) }
@@ -1532,7 +1447,7 @@ class CameraController(
                 b.set(CaptureRequest.TONEMAP_CURVE, TonemapCurve(pts, pts, pts))
             }
         }
-        if (!capture && cfg.faceAf && faceAfSupported) {
+        if ((cfg.faceAf || cfg.mode == 1) && faceAfSupported) {
             b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE)
         }
         if (capture) {
@@ -1558,7 +1473,7 @@ class CameraController(
         Build.VERSION.SDK_INT >= 23 &&
             effMode() == 0 &&
             cfg.scene == 0 &&
-            !cfg.manualExposure &&
+            cfg.photoExposureMode == 0 &&
             cfg.flashMode == 0 &&
             zoom <= 1.01f &&
             chars.availableCaptureRequestKeys.contains(CaptureRequest.CONTROL_ENABLE_ZSL)
@@ -1618,9 +1533,17 @@ class CameraController(
         }
         val s = session ?: return
         if (reader == null) return
+        val now = SystemClock.elapsedRealtime()
+        val sinceLastShot = now - lastCaptureStartedAt
+        if (lastCaptureStartedAt != 0L && sinceLastShot < 2_000L) {
+            ui.onMessage("Please wait ${(2_000L - sinceLastShot + 999L) / 1_000L} second before the next photo.")
+            return
+        }
+        lastCaptureStartedAt = now
         busy = true
         ui.onBusy(true)
-        val useFlash = flashAvail && cfg.flashMode != 0 && !cfg.manualExposure && cfg.scene == 0 && effMode() != 2
+        handler.postDelayed({ if (!busy) ui.onBusy(false) }, 2_000L)
+        val useFlash = flashAvail && cfg.flashMode != 0 && cfg.photoExposureMode == 0 && cfg.scene == 0 && effMode() != 2
         if (useFlash) {
             try {
                 val b = buildPhotoPreview() ?: throw IllegalStateException("no preview")
@@ -1667,7 +1590,7 @@ class CameraController(
         if (!manualSensor) return null
         var e0: Long
         var s0: Int
-        if (cfg.manualExposure) {
+        if (photoManualExposure()) {
             e0 = (1e9 / cfg.shutterDenom).toLong()
             s0 = cfg.iso
         } else {
@@ -1685,14 +1608,15 @@ class CameraController(
         val fastMain = cfg.fastMovingObjects && cfg.cameraId == "0"
         val maxFrame = chars.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: er.upper
         val exposureLimit = min(er.upper, maxFrame)
-        val smartIsoActive = cfg.smartIso && !cfg.manualExposure && !allowHighIso && !fastMain
-        // Smart ISO is allowed to lengthen the shutter as far as 1/20 s, but never beyond it.
+        val smartIsoActive = cfg.photoExposureMode == 1 && !fastMain
+        val smartIsoHighAllowed = allowHighIso || smartIsoNeedsHigh()
+        // Smart ISO never lets the shutter fall below 1/33 s. Higher ISO is used when needed.
         val maxExposure = when {
             fastMain -> min(8_000_000L, exposureLimit)
-            smartIsoActive -> min(50_000_000L, exposureLimit)
+            smartIsoActive -> min(30_303_030L, exposureLimit)
             else -> exposureLimit
         }
-        val isoCeiling = if (smartIsoActive) min(500, isoRange.upper).coerceAtLeast(isoRange.lower) else isoRange.upper
+        val isoCeiling = if (smartIsoActive && !smartIsoHighAllowed) min(500, isoRange.upper).coerceAtLeast(isoRange.lower) else isoRange.upper
         val preferredTimes = longArrayOf(e0 / 8L, e0, (e0.toDouble() * 2.0).toLong(), (e0.toDouble() * 8.0).toLong()).map { it.coerceIn(er.lower, maxExposure) }
         val exposures = LongArray(4)
         val sensitivities = IntArray(4)
@@ -1714,32 +1638,50 @@ class CameraController(
         if (awbLockAvail) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
     }
 
-    /** True when the metered scene needs more than ISO 500 even at the 1/20 s limit. */
-    fun smartIsoNeedsHigh(): Boolean {
-        if (!manualSensor || cfg.manualExposure || !cfg.smartIso || cfg.fastMovingObjects) return false
-        val er = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ?: return false
+    /** Smart ISO is available only when this active camera can enforce ISO <= 500 manually. */
+    val smartIsoSupported: Boolean
+        get() = manualSensor && isoRange.lower <= 500 && isoRange.upper >= 500 &&
+            (chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.upper ?: 0L) > 0L
+
+    private fun smartIsoMaxExposure(): Long {
+        val er = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            ?: return 0L
         val maxFrame = chars.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: er.upper
-        val maxExposure = min(50_000_000L, min(er.upper, maxFrame))
+        return min(30_303_030L, min(er.upper, maxFrame))
+    }
+
+    /** True when the scene needs ISO above 500 even at the 1/33 s shutter limit. */
+    fun smartIsoNeedsHigh(): Boolean {
+        if (!smartIsoSupported || photoManualExposure() || cfg.photoExposureMode != 1 || cfg.fastMovingObjects) return false
+        val maxExposure = smartIsoMaxExposure()
         val currentIso = liveIso.takeIf { it > 0 } ?: return false
         val currentExposure = liveExpNs.takeIf { it > 0L } ?: return false
-        val targetIso = 500.coerceIn(isoRange.lower, min(500, isoRange.upper).coerceAtLeast(isoRange.lower))
-        val requiredExposure = currentExposure.toDouble() * currentIso / targetIso
+        val baseIso = currentIso.coerceAtMost(500).coerceIn(isoRange.lower, 500)
+        val requiredExposure = currentExposure.toDouble() * currentIso / baseIso
         return requiredExposure > maxExposure.toDouble()
     }
 
     private fun applySmartIsoExposure(b: CaptureRequest.Builder) {
-        if (!manualSensor) return
+        if (!smartIsoSupported) return
         val er = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ?: return
+        val maxExposure = smartIsoMaxExposure()
+        if (maxExposure < er.lower) return
         val currentIso = liveIso.takeIf { it > 0 } ?: 100
         val currentExposure = liveExpNs.takeIf { it > 0L } ?: 33_333_333L
-        val maxFrame = chars.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: er.upper
-        val maxExposure = min(50_000_000L, min(er.upper, maxFrame))
-        val targetIso = currentIso.coerceAtMost(500).coerceIn(isoRange.lower, min(500, isoRange.upper).coerceAtLeast(isoRange.lower))
-        // Lock the still to a metered ISO no higher than 500; use shutter time up to 1/20 s.
-        val targetExposure = (currentExposure.toDouble() * currentIso / targetIso).toLong().coerceIn(er.lower, maxExposure)
+        val baseIso = currentIso.coerceAtMost(500).coerceIn(isoRange.lower, 500)
+        val requiredExposure = currentExposure.toDouble() * currentIso / baseIso
+        val targetExposure = requiredExposure.toLong().coerceIn(er.lower, maxExposure)
+        // At 1/33 s, raise ISO only as far as the metered scene requires.
+        val targetIso = if (requiredExposure > maxExposure.toDouble()) {
+            (currentExposure.toDouble() * currentIso / maxExposure).roundToInt()
+                .coerceIn(isoRange.lower, isoRange.upper)
+        } else {
+            baseIso
+        }
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+        b.set(CaptureRequest.CONTROL_AE_LOCK, false)
         b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, targetExposure)
-        b.set(CaptureRequest.SENSOR_FRAME_DURATION, targetExposure.coerceAtLeast(er.lower))
+        b.set(CaptureRequest.SENSOR_FRAME_DURATION, targetExposure.coerceAtLeast(er.lower).coerceAtMost(maxExposure))
         b.set(CaptureRequest.SENSOR_SENSITIVITY, targetIso)
         b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
     }
@@ -1771,7 +1713,10 @@ class CameraController(
         try {
             val fmt = captureFormat()
             if (cfg.photoFormat == 3 && ultraHdrAvailable && fmt != ImageFormat.JPEG_R) {
-                handler.post { ui.onMessage("Photo filters are active; using standard JPEG so the selected look is applied. Turn filters off for native Ultra HDR.") }
+                handler.post { ui.onMessage("Photo processing is active; using standard JPEG for this shot instead of native Ultra HDR.") }
+            }
+            if (effMode() == 2 && (cfg.backgroundColorShiftEnabled || cfg.portraitPhotoModeEnabled || cfg.bokehEnhancementEnabled)) {
+                handler.post { ui.onMessage("Photo effects are enabled; using a normal JPEG for this shot instead of the 4-frame HDR bracket.") }
             }
             val plan = scenePlan()
             if (cfg.scene in 1..2 && plan == null) {
@@ -1779,8 +1724,9 @@ class CameraController(
                 finishBusy()
                 return
             }
-            val bracket = if (effMode() == 2) hdrPlan(allowHighIso) else null
-            if (effMode() == 2 && bracket == null) {
+            val photoEffectsActive = cfg.backgroundColorShiftEnabled || cfg.portraitPhotoModeEnabled || cfg.bokehEnhancementEnabled
+            val bracket = if (effMode() == 2 && !photoEffectsActive) hdrPlan(allowHighIso) else null
+            if (effMode() == 2 && !photoEffectsActive && bracket == null) {
                 handler.post { ui.onMessage("Not enough exposure range for Ultra HDR here, saving a normal JPEG") }
             }
             if (bracket != null && (cfg.filterId > 0 || cfg.flat || cfg.bw || cfg.photoLook != 0)) {
@@ -1799,10 +1745,10 @@ class CameraController(
                 val b = cd.createCaptureRequest(template)
                 b.addTarget(rd.surface)
                 applyPhotoControls(b, true)
-                if (bracket == null && plan == null && !cfg.manualExposure && cfg.flashMode == 0) {
+                if (bracket == null && plan == null && !photoManualExposure() && cfg.flashMode == 0) {
                     if (cfg.fastMovingObjects && cfg.cameraId == "0") {
                         applyFastMotionExposure(b)
-                    } else if (cfg.smartIso && !allowHighIso) {
+                    } else if (cfg.photoExposureMode == 1) {
                         applySmartIsoExposure(b)
                     }
                 }
@@ -1821,7 +1767,12 @@ class CameraController(
             val sh = Shot(
                 cfg.cameraId, fmt, chars, needRotation(), cfg.photoQuality, reqs.size,
                 cfg.bw, cfg.flat && !cfg.bw, cfg.photoLook, bracket != null, false, cfg.glow, cfg.blue,
-                cfg.filterId, cfg.photoFilterIntensity, (cfg.photoContrastByLens[cfg.cameraId] ?: cfg.photoContrast).coerceIn(0, 100), if (bracket != null) 8f else 1f
+                cfg.filterId, cfg.photoFilterIntensity, (cfg.photoContrastByLens[cfg.cameraId] ?: cfg.photoContrast).coerceIn(0, 100),
+                cfg.backgroundColorShiftEnabled, cfg.backgroundHueShift, cfg.backgroundSaturation, cfg.backgroundTemperature,
+                cfg.portraitPhotoModeEnabled, cfg.portraitBlurPercent,
+                cfg.bokehEnhancementEnabled, cfg.bokehStrength, cfg.bokehGlow, cfg.bokehShape,
+                hasValidAutoPortraitConfirmation(),
+                if (bracket != null) 8f else 1f
             )
             synchronized(lock) { shot = sh }
             if (plan != null && plan.expNs * reqs.size >= 1_500_000_000L) {
@@ -1840,7 +1791,11 @@ class CameraController(
     private val captureCb = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, res: TotalCaptureResult) {
             synchronized(lock) {
-                shot?.result = res
+                shot?.let {
+                    it.result = res
+                    it.detectedFaceCount = max(it.detectedFaceCount, res.get(CaptureResult.STATISTICS_FACES)?.size ?: 0)
+                    it.completedResults++
+                }
                 maybeProcess()
             }
         }
@@ -1892,12 +1847,17 @@ class CameraController(
         if (sh.started) return
         if (sh.format == ImageFormat.RAW_SENSOR) {
             if (sh.image == null || sh.result == null) return
-        } else if (sh.jpegs.size < sh.expected) {
+        } else if (sh.jpegs.size < sh.expected || sh.completedResults < sh.expected || sh.result == null) {
+            // Wait for every capture result as well as every JPEG so the face count is final
+            // before deciding whether to run portrait and bokeh processing.
             return
         }
         sh.started = true
         shot = null
-        handler.post { endLong() }
+        handler.post {
+            endLong()
+            ui.onPhotoCaptured()
+        }
         if (sh.format != ImageFormat.RAW_SENSOR) {
             // the picture is safely in memory: let the shutter be used again while it is written to storage
             busy = false
@@ -1906,6 +1866,9 @@ class CameraController(
         jobCount.incrementAndGet()
         procExec.execute { processShot(sh) }
     }
+
+    private fun autoPortraitSubject(sh: Shot): Boolean =
+        sh.autoPortraitConfirmed && sh.detectedFaceCount in 1..2
 
     /** Apply the optional flat profile and/or selected filter; Natural otherwise stays untouched. */
     private fun finishLook(bmp: Bitmap, sh: Shot): Bitmap {
@@ -1918,6 +1881,16 @@ class CameraController(
                 out = filtered
             }
         }
+        // Subtle GPU denoise and detail recovery for photos already using an effect pipeline.
+        if ((sh.filterId > 0 && sh.filterIntensity > 0) || sh.contrast > 0 ||
+            sh.flat || sh.bw || sh.photoLook != 0 || sh.backgroundColorShift ||
+            sh.portraitPhotoMode || sh.bokehEnhancement || autoPortraitSubject(sh)) {
+            val detailed = PhotoGpuProcessor.enhanceDetails(out, 0.08f, 0.12f)
+            if (detailed != null) {
+                out.recycle()
+                out = detailed
+            }
+        }
         if (sh.contrast > 0) {
             val factor = 1f + sh.contrast.coerceIn(0, 100) / 100f
             val offset = 127.5f * (1f - factor)
@@ -1927,12 +1900,39 @@ class CameraController(
                 0f, 0f, factor, 0f, offset,
                 0f, 0f, 0f, 1f, 0f
             ))
-            val contrasted = Bitmap.createBitmap(out.width, out.height, Bitmap.Config.ARGB_8888)
-            Canvas(contrasted).drawBitmap(out, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply {
-                colorFilter = ColorMatrixColorFilter(matrix)
-            })
+            val contrasted = PhotoGpuProcessor.applyColorMatrix(out, matrix.array) ?: run {
+                Bitmap.createBitmap(out.width, out.height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                    Canvas(bitmap).drawBitmap(out, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply {
+                        colorFilter = ColorMatrixColorFilter(matrix)
+                    })
+                }
+            }
             out.recycle()
             out = contrasted
+        }
+        // Portrait processing requires the user's five-minute confirmation and exactly one or two faces.
+        if (autoPortraitSubject(sh)) {
+            val blurPercent = if (sh.portraitBlurPercent == 40) 50 else sh.portraitBlurPercent
+            val blurred = runCatching { PhotoPortraitBlur.apply(out, blurPercent, sh.detectedFaceCount) }.getOrNull()
+            if (blurred != null) { out.recycle(); out = blurred }
+            else handler.post { ui.onMessage("Portrait Photo Mode could not detect a clear subject; saved without blur.") }
+        }
+        if (sh.backgroundColorShift) {
+            val shifted = runCatching {
+                PhotoBackgroundColorShift.apply(out, sh.backgroundHueShift, sh.backgroundSaturation, sh.backgroundTemperature)
+            }.getOrNull()
+            if (shifted != null) {
+                out.recycle()
+                out = shifted
+            } else {
+                handler.post { ui.onMessage("Background Colour Shift could not identify a clear subject; saved the photo without the effect.") }
+            }
+        }
+        // Bokeh follows the same confirmation and one/two-face gate as portrait blur.
+        if (autoPortraitSubject(sh)) {
+            val enhanced = runCatching { PhotoBokehEnhancement.apply(out, sh.bokehStrength, sh.bokehGlow, sh.bokehShape) }.getOrNull()
+            if (enhanced != null) { out.recycle(); out = enhanced }
+            else handler.post { ui.onMessage("Bokeh Enhancement found no suitable background highlights; saved the photo unchanged.") }
         }
         return out
     }
@@ -1942,10 +1942,25 @@ class CameraController(
         try {
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val base = "IMG_${stamp}_L${sh.lens}"
-            if (Build.VERSION.SDK_INT >= 34 && sh.format == ImageFormat.JPEG_R) {
-                // Preserve the camera-generated Ultra HDR gain map byte-for-byte. Re-encoding
-                // through Bitmap/JPEG would destroy the HDR metadata and reduce highlight range.
+            if (Build.VERSION.SDK_INT >= 34 && sh.format == ImageFormat.JPEG_R && !autoPortraitSubject(sh)) {
+                // Preserve native Ultra HDR when portrait confirmation is absent or the scene is not one/two faces.
                 saved = saveBytes(sh.jpegs.first(), "$base.jpg")
+            } else if (Build.VERSION.SDK_INT >= 34 && sh.format == ImageFormat.JPEG_R && autoPortraitSubject(sh)) {
+                // Confirmed portrait effects require pixel processing, so this shot is saved as JPEG.
+                val bytes = sh.jpegs.first()
+                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    ?: throw IllegalStateException("Couldn't decode the Ultra HDR photo for face effects")
+                val out = finishLook(rotateBy(bmp, sh.rotDeg), sh)
+                saved = saveBitmap(out, "$base.jpg", sh.quality)
+                out.recycle()
+            } else if (sh.hdr && sh.jpegs.size >= 4 && autoPortraitSubject(sh)) {
+                // Apply confirmed portrait effects to the HDR base exposure only for one or two faces.
+                val baseBytes = uprightJpeg(sh.jpegs[1], sh.rotDeg)
+                val bmp = BitmapFactory.decodeByteArray(baseBytes, 0, baseBytes.size)
+                    ?: throw IllegalStateException("Couldn't decode the HDR base exposure for face effects")
+                val out = finishLook(bmp, sh)
+                saved = saveBitmap(out, "$base.jpg", sh.quality)
+                out.recycle()
             } else if (sh.hdr && sh.jpegs.size >= 4) {
                 // Four-frame order: -3 EV, 0 EV, +1 EV, +3 EV.
                 // Rotate each frame to upright pixels before analysing and building the gain map.
@@ -1984,7 +1999,7 @@ class CameraController(
                 out.recycle()
             } else {
                 val bytes = sh.jpegs[0]
-                saved = if ((sh.filterId > 0 && sh.filterIntensity > 0) || sh.contrast > 0 || sh.flat || sh.bw || sh.photoLook != 0) {
+                saved = if ((sh.filterId > 0 && sh.filterIntensity > 0) || sh.contrast > 0 || sh.flat || sh.bw || sh.photoLook != 0 || sh.backgroundColorShift || sh.portraitPhotoMode || sh.bokehEnhancement || autoPortraitSubject(sh)) {
                     val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     val out = finishLook(rotateBy(bmp, sh.rotDeg), sh)
                     val u = saveBitmap(out, "$base.jpg", sh.quality)

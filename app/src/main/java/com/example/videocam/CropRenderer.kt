@@ -37,8 +37,8 @@ class CropRenderer(
     private val filterMatrix: FloatArray? = null,
     private val effectId: Int = 0,
     private val effectStrength: Float = 1f,
-    private val portraitOutput: Boolean = false,
-    private val portraitRotationDegrees: Int = 90
+    private val contrastStrength: Float = 0.1f,
+    private val portraitOutput: Boolean = false
 ) {
     private val thread = HandlerThread("crop-gl").apply { start() }
     private val handler = Handler(thread.looper)
@@ -55,6 +55,7 @@ class CropRenderer(
     private var uOffset = 0
     private var uEffect = 0
     private var uStrength = 0
+    private var uContrast = 0
     private var uTexel = 0
     private var aPos = 0
     private var aTc = 0
@@ -129,10 +130,11 @@ class CropRenderer(
         val fs = "#extension GL_OES_EGL_image_external : require\n" +
             "precision highp float;varying vec2 vTc;uniform samplerExternalOES sTex;" +
             "uniform vec4 uR;uniform vec4 uG;uniform vec4 uB;uniform vec4 uA;uniform vec4 uOffset;" +
-            "uniform int uEffect;uniform float uStrength;uniform vec2 uTexel;" +
+            "uniform int uEffect;uniform float uStrength;uniform float uContrast;uniform vec2 uTexel;" +
             "void main(){vec4 c=texture2D(sTex,vTc);" +
             "vec4 g=vec4(dot(uR,c),dot(uG,c),dot(uB,c),dot(uA,c))+uOffset;" +
-            "vec3 rgb=g.rgb;" +
+            "float contrast=1.0+clamp(uContrast,0.0,1.0);" +
+            "vec3 rgb=(g.rgb-vec3(0.5))*contrast+vec3(0.5);" +
             "if(uEffect==14){vec3 b=(texture2D(sTex,vTc+vec2(uTexel.x*3.0,0.0)).rgb+" +
             "texture2D(sTex,vTc-vec2(uTexel.x*3.0,0.0)).rgb+" +
             "texture2D(sTex,vTc+vec2(0.0,uTexel.y*3.0)).rgb+" +
@@ -152,6 +154,8 @@ class CropRenderer(
             "vec2 shift=radial*dot(radial,radial)*(0.0018*uStrength);" +
             "float rr=texture2D(sTex,vTc+shift).r;float bb=texture2D(sTex,vTc-shift).b;" +
             "rgb=vec3(rr,rgb.g,bb);}" +
+            "float redLuma=dot(rgb,vec3(0.2126,0.7152,0.0722));" +
+            "rgb.r=redLuma+(rgb.r-redLuma)*0.80;" +
             "gl_FragColor=vec4(clamp(rgb,0.0,1.0),c.a);}"
         program = link(compile(GLES20.GL_VERTEX_SHADER, vs), compile(GLES20.GL_FRAGMENT_SHADER, fs))
         uTex = GLES20.glGetUniformLocation(program, "uTex")
@@ -162,59 +166,68 @@ class CropRenderer(
         uOffset = GLES20.glGetUniformLocation(program, "uOffset")
         uEffect = GLES20.glGetUniformLocation(program, "uEffect")
         uStrength = GLES20.glGetUniformLocation(program, "uStrength")
+        uContrast = GLES20.glGetUniformLocation(program, "uContrast")
         uTexel = GLES20.glGetUniformLocation(program, "uTexel")
         aPos = GLES20.glGetAttribLocation(program, "aPos")
         aTc = GLES20.glGetAttribLocation(program, "aTc")
 
-        // The camera picture comes in upright as if the phone were held in portrait; turn it to landscape
-        // and let the output bounds cut the top and bottom. yh > 1 means the picture is taller than the frame.
-        val yh = if (portraitOutput) {
-            (outW * srcW.toFloat() / srcH) / outH
+        // Fit the rotated camera image to the recorder surface without stretching it.
+        // Camera buffers are landscape (srcW x srcH); portrait output rotates that image
+        // into srcH x srcW before the centre-crop is calculated.
+        // Keep the incoming camera texture in its original orientation.
+        // For portrait output, centre-crop the landscape frame to portrait without
+        // applying any additional quarter-turn or mirroring in texture coordinates.
+        // In portrait mode the incoming SurfaceTexture is already presented upright;
+        // its displayed aspect is therefore the inverse of the landscape buffer dimensions.
+        // Use that displayed aspect so the full frame maps 1:1 instead of centre-cropping it.
+        val sourceAspect = if (portraitOutput) {
+            srcH.toFloat() / srcW.coerceAtLeast(1)
         } else {
-            (outW * srcH.toFloat() / srcW) / outH
+            srcW.toFloat() / srcH.coerceAtLeast(1)
         }
-        val q = if (portraitOutput && portraitRotationDegrees == 90) {
+        val targetAspect = outW.toFloat() / outH.coerceAtLeast(1)
+        val cropX = maxOf(1f, sourceAspect / targetAspect)
+        val cropY = maxOf(1f, targetAspect / sourceAspect)
+        val q = if (portraitOutput) {
             floatArrayOf(
-                -1f, -yh, 1f, 0f,
-                 1f, -yh, 1f, 1f,
-                -1f,  yh, 0f, 0f,
-                 1f,  yh, 0f, 1f
-            )
-        } else if (portraitOutput) {
-            floatArrayOf(
-                -1f, -yh, 0f, 1f,
-                 1f, -yh, 0f, 0f,
-                -1f,  yh, 1f, 1f,
-                 1f,  yh, 1f, 0f
-            )
-        } else if (fullFrame && rotation == Surface.ROTATION_0) {
-            floatArrayOf(
-                -1f, -yh, 0f, 0f,
-                 1f, -yh, 1f, 0f,
-                -1f,  yh, 0f, 1f,
-                 1f,  yh, 1f, 1f
-            )
-        } else if (fullFrame && rotation == Surface.ROTATION_180) {
-            floatArrayOf(
-                -1f, -yh, 1f, 1f,
-                 1f, -yh, 0f, 1f,
-                -1f,  yh, 1f, 0f,
-                 1f,  yh, 0f, 0f
-            )
-        } else if (rotation == Surface.ROTATION_270) {
-            floatArrayOf(
-                -1f, -yh, 1f, 0f,
-                 1f, -yh, 1f, 1f,
-                -1f,  yh, 0f, 0f,
-                 1f,  yh, 0f, 1f
+                -cropX, -cropY, 0f, 0f,
+                 cropX, -cropY, 1f, 0f,
+                -cropX,  cropY, 0f, 1f,
+                 cropX,  cropY, 1f, 1f
             )
         } else {
-            floatArrayOf(
-                -1f, -yh, 0f, 1f,
-                 1f, -yh, 0f, 0f,
-                -1f,  yh, 1f, 1f,
-                 1f,  yh, 1f, 0f
-            )
+            val yh = (outW * srcH.toFloat() / srcW.coerceAtLeast(1)) / outH.coerceAtLeast(1)
+            val xh = maxOf(1f, 1f / yh)
+            val y = maxOf(1f, yh)
+            if (fullFrame && rotation == Surface.ROTATION_0) {
+                floatArrayOf(
+                    -xh, -y, 0f, 0f,
+                     xh, -y, 1f, 0f,
+                    -xh,  y, 0f, 1f,
+                     xh,  y, 1f, 1f
+                )
+            } else if (fullFrame && rotation == Surface.ROTATION_180) {
+                floatArrayOf(
+                    -xh, -y, 1f, 1f,
+                     xh, -y, 0f, 1f,
+                    -xh,  y, 1f, 0f,
+                     xh,  y, 0f, 0f
+                )
+            } else if (rotation == Surface.ROTATION_270) {
+                floatArrayOf(
+                    -xh, -y, 1f, 0f,
+                     xh, -y, 1f, 1f,
+                    -xh,  y, 0f, 0f,
+                     xh,  y, 0f, 1f
+                )
+            } else {
+                floatArrayOf(
+                    -xh, -y, 0f, 1f,
+                     xh, -y, 0f, 0f,
+                    -xh,  y, 1f, 1f,
+                     xh,  y, 1f, 0f
+                )
+            }
         }
         verts = ByteBuffer.allocateDirect(q.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
         verts.put(q).position(0)
@@ -274,6 +287,7 @@ class CropRenderer(
             }
             GLES20.glUniform1i(uEffect, effectId)
             GLES20.glUniform1f(uStrength, effectStrength.coerceIn(0f, 1f))
+            GLES20.glUniform1f(uContrast, contrastStrength.coerceIn(0f, 1f))
             GLES20.glUniform2f(uTexel, 1f / srcW.coerceAtLeast(1), 1f / srcH.coerceAtLeast(1))
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)

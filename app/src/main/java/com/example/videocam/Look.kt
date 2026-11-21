@@ -174,7 +174,7 @@ object Look {
         "Hasselblad Natural Colour (inspired)", "Hasselblad Portrait (inspired)", "Hasselblad Vivid (inspired)",
         "Fujifilm Classic Chrome (inspired)", "Fujifilm Velvia (inspired)", "Fujifilm Astia (inspired)",
         "Fujifilm Pro Neg (inspired)", "Fujifilm Nostalgic Neg (inspired)", "Sony S-Cinetone (inspired)",
-        "Panasonic Lumix Cinelike D (inspired)", "Nikon Natural Colour (inspired)"
+        "Panasonic Lumix Cinelike D (inspired)", "Nikon Natural Colour (inspired)", "RED Komodo Cinema (inspired)"
     )
 
     private fun filterMatrix(id: Int): ColorMatrix {
@@ -230,30 +230,34 @@ object Look {
             )) // Zeiss-inspired colour: restrained saturation, clean blues, natural reds
             19 -> basic(1.02f, 1.01f, 2f, 1f, 2f) // Hasselblad Natural Colour
             20 -> basic(0.92f, 0.98f, 5f, 2f, -3f) // Hasselblad Portrait
-            21 -> basic(1.18f, 1.06f, 3f, 2f, 5f) // Hasselblad Vivid
+            21 -> basic(1.06f, 1.04f, 2f, 1f, 3f) // Hasselblad Vivid, restrained saturation
             22 -> basic(0.75f, 1.04f, 5f, 3f, -2f) // Fujifilm Classic Chrome
-            23 -> basic(1.28f, 1.10f, 1f, 2f, 3f) // Fujifilm Velvia
+            23 -> basic(1.08f, 1.06f, 1f, 1f, 2f) // Fujifilm Velvia-inspired, restrained saturation
             24 -> basic(1.08f, 0.98f, 5f, 3f, -2f) // Fujifilm Astia
             25 -> basic(0.82f, 0.95f, 2f, 3f, 4f) // Fujifilm Pro Neg
             26 -> basic(1.03f, 0.97f, 8f, 4f, -6f) // Fujifilm Nostalgic Neg
             27 -> basic(0.92f, 0.97f, 3f, 2f, 4f) // Sony S-Cinetone
             28 -> basic(0.88f, 0.90f, 2f, 2f, 3f) // Panasonic Lumix Cinelike D
             29 -> basic(1.00f, 1.02f, 2f, 1f, -1f) // Nikon-inspired restrained neutral colour
+            30 -> ColorMatrix(floatArrayOf(
+                1.04f, 0.015f, -0.035f, 0f, 2f,
+                -0.01f, 1.02f, 0.01f, 0f, 1f,
+                -0.025f, 0.02f, 1.06f, 0f, 3f,
+                0f, 0f, 0f, 1f, 0f
+            )) // RED Komodo-inspired cinema grade: restrained saturation, balanced skin, subtle cool shadows
             else -> ColorMatrix()
         }
     }
 
-    private fun intensityMatrix(id: Int, intensity: Int): ColorMatrix {
+    private fun intensityMatrix(id: Int, intensity: Int, reduceRedChroma: Boolean = true): ColorMatrix {
         val target = filterMatrix(id).array
-        // Keep red-heavy looks from pushing reds and skin tones too far. This subtle
-        // red/green chroma cross-mix is shared by preview, stills and the video shader.
-        // Leave monochrome looks untouched.
-        if (id > 0 && id != 1 && id != 9) {
+        // Retain 83% of red-channel chroma (a 17% reduction) for every selected look,
+        // including Sony S-Cinetone. Natural (ID 0) remains neutral.
+        if (reduceRedChroma && id > 0) {
+            val original = target.copyOf()
             for (i in 0..4) {
-                val red = target[i]
-                val green = target[5 + i]
-                target[i] = red * 0.92f + green * 0.08f
-                target[5 + i] = green * 0.98f + red * 0.02f
+                val luma = original[i] * 0.213f + original[5 + i] * 0.715f + original[10 + i] * 0.072f
+                target[i] = luma + (original[i] - luma) * 0.83f
             }
         }
         val identity = ColorMatrix().array
@@ -267,7 +271,9 @@ object Look {
 
     /** 4x5 Android ColorMatrix values consumed by the EGL video renderer. */
     fun videoFilterMatrix(id: Int, intensity: Int): FloatArray =
-        intensityMatrix(id, intensity).array.copyOf()
+        // Video applies the 17% red-chroma reduction in the final EGL shader stage,
+        // after video contrast, so contrast cannot undo the correction.
+        intensityMatrix(id, intensity, reduceRedChroma = false).array.copyOf()
 
     /** Render a selected look into a saved still. Effects are deliberately photo-only until a GPU video path exists. */
     fun applyPreset(src: Bitmap, id: Int, intensity: Int): Bitmap {
@@ -276,10 +282,13 @@ object Look {
         var base = src
         val matrix = intensityMatrix(id, intensity)
         if (id != 16) {
-            val graded = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-            Canvas(graded).drawBitmap(src, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply {
-                colorFilter = ColorMatrixColorFilter(matrix)
-            })
+            val graded = PhotoGpuProcessor.applyColorMatrix(src, matrix.array) ?: run {
+                Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                    Canvas(bitmap).drawBitmap(src, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply {
+                        colorFilter = ColorMatrixColorFilter(matrix)
+                    })
+                }
+            }
             base = graded
         }
         val result = when (id) {

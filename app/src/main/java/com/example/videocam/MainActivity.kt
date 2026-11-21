@@ -6,7 +6,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import android.content.ContentUris
-import android.content.ContentValues
+import android.content.Context
 import android.content.res.ColorStateList
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -20,6 +20,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
@@ -35,6 +36,9 @@ import android.os.StatFs
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Size
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
 import android.view.Gravity
@@ -57,11 +61,15 @@ import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ProgressBar
 import android.widget.SeekBar
+import android.widget.Spinner
+import android.widget.ArrayAdapter
+import android.widget.CheckBox
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.io.ByteArrayOutputStream
 import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.NetworkInterface
 import java.util.concurrent.Executors
 import org.json.JSONObject
@@ -106,12 +114,15 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private lateinit var peakView: ImageView
     private lateinit var falseLegend: TextView
     private lateinit var grid: GridOverlayView
+    private lateinit var previewBlink: View
     private lateinit var slider: VerticalSlider
     private lateinit var zoomSlider: ZoomSlider
     private lateinit var expSlider: ZoomSlider
     private lateinit var timecode: TextView
     private lateinit var statusText: TextView
     private lateinit var warn: TextView
+    private lateinit var smartIsoWarning: TextView
+    private lateinit var facePortraitStatus: TextView
     private lateinit var lockText: TextView
     private lateinit var countdownText: TextView
     private lateinit var meter: ProgressBar
@@ -169,7 +180,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private lateinit var topBar: LinearLayout
     private lateinit var topRow2: FrameLayout
     private lateinit var expLabel: TextView
-    private lateinit var exposureSummary: TextView
+    private lateinit var exposureSummary: LinearLayout
     private var prevW = 0
     private var prevH = 0
     private var photoOri = -1
@@ -211,6 +222,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private var expAnim: ValueAnimator? = null
     private var expSliderManual: Boolean? = null
     private var cfgDirty = false
+    // Temporary permission to exceed ISO 500; expires automatically.
     private var lastSliderHapticMs = 0L
     private var countdown = 0
     private var askedPerms = false
@@ -355,7 +367,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         cancelCountdown()
         cancelExpPull()
         oriListener.disable()
-        stopMonitor() // release the Wi-Fi/ADB monitor server when the app leaves the foreground
+        stopMonitor() // release the Wi-Fi monitor server when the app leaves the foreground
         tap?.stop() // stop again after stopMonitor updates audio state; never leave mic capture running in background
         if (cfgDirty) store.save("last", cfg)
         cam.stop()
@@ -575,6 +587,47 @@ class MainActivity : Activity(), CameraController.Callbacks {
             .show()
     }
 
+    /** Minimal monochrome shutter/video glyph used by the photo/video mode switch. */
+    private class CameraModeIconDrawable(context: Context, private val photo: Boolean) : android.graphics.drawable.Drawable() {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = context.resources.displayMetrics.density * 1.8f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        private val d = context.resources.displayMetrics.density
+        override fun draw(canvas: android.graphics.Canvas) {
+            val b = bounds
+            val cx = b.exactCenterX()
+            val cy = b.exactCenterY()
+            val save = canvas.save()
+            canvas.translate(cx - 10f * d, cy - 10f * d)
+            if (photo) {
+                // Camera body + raised viewfinder + centered lens.
+                val body = android.graphics.RectF(1f*d, 5f*d, 19f*d, 17f*d)
+                canvas.drawRoundRect(body, 2f*d, 2f*d, paint)
+                canvas.drawRoundRect(android.graphics.RectF(5f*d, 2f*d, 11f*d, 6f*d), 1f*d, 1f*d, paint)
+                canvas.drawCircle(10f*d, 11f*d, 3.2f*d, paint)
+            } else {
+                // Camcorder body with distinct forward lens hood.
+                val body = android.graphics.RectF(1f*d, 5f*d, 14f*d, 16f*d)
+                canvas.drawRoundRect(body, 2f*d, 2f*d, paint)
+                val lens = Path().apply {
+                    moveTo(14f*d, 8f*d); lineTo(20f*d, 5f*d)
+                    lineTo(20f*d, 16f*d); lineTo(14f*d, 13f*d); close()
+                }
+                canvas.drawPath(lens, paint)
+            }
+            canvas.restoreToCount(save)
+        }
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+        override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) { paint.colorFilter = colorFilter }
+        override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+        override fun getIntrinsicWidth(): Int = (24f*d).toInt()
+        override fun getIntrinsicHeight(): Int = (24f*d).toInt()
+    }
+
     private fun fmtZoom(z: Float) = if (z == z.toInt().toFloat()) "${z.toInt()}x" else "%.1fx".format(z)
 
     // ---------- redesigned format and looks panels ----------
@@ -606,6 +659,9 @@ class MainActivity : Activity(), CameraController.Callbacks {
             val size = runCatching { cam.captureSize() }.getOrNull()
             val sizeText = size?.let { "%.1f MP · %d × %d".format(it.width * it.height / 1e6, it.width, it.height) } ?: "Unavailable"
             add("PHOTO SIZE", sizeText) { pickPhotoRes() }
+            val effectivePortraitBlur = if (cfg.portraitBlurPercent == 40) 50 else cfg.portraitBlurPercent
+            val portraitDetail = if (cfg.portraitPhotoModeEnabled) "ON · Face-triggered blur ${effectivePortraitBlur}%" else "OFF · Auto activates at 50% when a face is detected"
+            add("PORTRAIT PHOTO MODE", portraitDetail) { showPortraitPhotoModeDialog() }
             add("CAPTURE FORMAT", when {
                 cam.effMode() == 2 -> "Ultra HDR · 4-frame bracket"
                 cfg.photoFormat == 3 && cam.ultraHdrAvailable -> "Native Ultra HDR JPEG_R"
@@ -633,7 +689,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private fun showLooksDialog() {
         val groups = listOf(
             "Natural" to listOf(0),
-            "Inspired" to listOf(18, 10, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29),
+            "Inspired" to listOf(18, 10, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30),
             "Cinematic" to listOf(2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 1)
         )
         val names = Look.FILTER_NAMES
@@ -649,6 +705,18 @@ class MainActivity : Activity(), CameraController.Callbacks {
                     applyLook(ids[index])
                     currentLut.text = "CURRENT LUT · " + names.getOrElse(cfg.filterId) { "Natural" }
                 }
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, 0, 0, dp(8)) })
+        }
+        if (cfg.mode == 1) {
+            val shiftDetail = if (cfg.backgroundColorShiftEnabled) {
+                "ON · Hue ${cfg.backgroundHueShift}° · Saturation ${cfg.backgroundSaturation}%"
+            } else "OFF · Adjust background colour without changing the subject"
+            box.addView(panelAction("BACKGROUND COLOUR SHIFT", shiftDetail) {
+                showBackgroundColorShiftDialog()
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, dp(8), 0, dp(8)) })
+            val bokehDetail = if (cfg.bokehEnhancementEnabled) "ON · Face-only · Strength ${cfg.bokehStrength}% · Glow ${cfg.bokehGlow}%" else "OFF · Auto activates with portrait mode when a face is detected"
+            box.addView(panelAction("BOKEH ENHANCEMENT", bokehDetail) {
+                showBokehEnhancementDialog()
             }, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, 0, 0, dp(8)) })
         }
         box.addView(currentLut)
@@ -672,6 +740,215 @@ class MainActivity : Activity(), CameraController.Callbacks {
         }, LinearLayout.LayoutParams(MATCH, WRAP))
         MaterialAlertDialogBuilder(this).setTitle("LOOKS").setView(box).setNegativeButton("Done", null).show()
     }
+
+    private fun showPortraitPhotoModeDialog() {
+        if (cfg.mode != 1 || !idle()) return
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(8), dp(18), dp(8)) }
+        val note = TextView(this).apply {
+            text = "Photo-only. When one or two faces are detected, tap the green prompt to enable Portrait Mode. Confirmation lasts five minutes; effects turn off when the face leaves and reactivate if they return during that period. Three or more faces never activate portrait mode. Default blur is 50%."
+            setTextColor(0xFFBDB8C7.toInt()); textSize = 12f; setPadding(0, 0, 0, dp(10))
+        }
+        box.addView(note)
+        val enabled = CheckBox(this).apply { text = "Default Portrait Photo Mode"; setTextColor(0xFFF3F0E8.toInt()); isChecked = cfg.portraitPhotoModeEnabled }
+        box.addView(enabled)
+        val amountLabel = TextView(this).apply { text = if (cfg.portraitBlurPercent == 40) "BACKGROUND BLUR · AUTO" else "BACKGROUND BLUR · MANUAL ${cfg.portraitBlurPercent}%"; setTextColor(0xFFF3F0E8.toInt()); textSize = 12f; setPadding(0, dp(10), 0, 0) }
+        box.addView(amountLabel)
+        val amount = SeekBar(this).apply { max = 100; progress = cfg.portraitBlurPercent.coerceIn(0,100) }
+        box.addView(amount, LinearLayout.LayoutParams(MATCH, WRAP))
+        enabled.setOnCheckedChangeListener { _, checked -> cfg.portraitPhotoModeEnabled = checked; cfgDirty = true; amount.isEnabled = checked }
+        amount.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                cfg.portraitBlurPercent = value; cfgDirty = true; amountLabel.text = if (value == 40) "BACKGROUND BLUR · AUTO" else "BACKGROUND BLUR · MANUAL $value%"
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        amount.isEnabled = enabled.isChecked
+        MaterialAlertDialogBuilder(this).setTitle("PORTRAIT PHOTO MODE").setView(box).setNegativeButton("Done", null).show()
+    }
+
+    private fun showBokehEnhancementDialog() {
+        if (cfg.mode != 1 || !idle()) return
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+        }
+        val note = TextView(this).apply {
+            text = "Photo-only. Bokeh Enhancement follows the confirmed one/two-face Portrait Mode window. It uses the selected strength, glow and aperture settings, and enhances existing background highlights rather than creating optical bokeh from nothing. Default strength is 25%."
+            setTextColor(0xFFBDB8C7.toInt()); textSize = 12f; setPadding(0, 0, 0, dp(10))
+        }
+        box.addView(note)
+        val enabled = CheckBox(this).apply {
+            text = "Default Bokeh Enhancement"
+            setTextColor(0xFFF3F0E8.toInt())
+            isChecked = cfg.bokehEnhancementEnabled
+        }
+        box.addView(enabled)
+        fun addSlider(title: String, initial: Int, onChange: (Int) -> Unit): SeekBar {
+            val label = TextView(this).apply {
+                text = "$title · $initial%"
+                setTextColor(0xFFF3F0E8.toInt()); textSize = 12f; setPadding(0, dp(10), 0, 0)
+            }
+            box.addView(label)
+            val seek = SeekBar(this).apply { max = 100; progress = initial }
+            seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                    label.text = "$title · $value%"
+                    if (fromUser) onChange(value)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+            box.addView(seek, LinearLayout.LayoutParams(MATCH, WRAP))
+            return seek
+        }
+        val strength = addSlider("BOKEH STRENGTH", cfg.bokehStrength) { cfg.bokehStrength = it; cfgDirty = true }
+        val glow = addSlider("GLOW", cfg.bokehGlow) { cfg.bokehGlow = it; cfgDirty = true }
+        val shapeNames = listOf("Circular", "Oval", "Polygon", "Swirl")
+        val shape = TextView(this).apply {
+            text = "BOKEH SHAPE · ${shapeNames[cfg.bokehShape.coerceIn(0, 3)]}"
+            setTextColor(0xFFF3F0E8.toInt()); textSize = 12f; setPadding(0, dp(12), 0, dp(6))
+        }
+        box.addView(shape)
+        box.addView(panelAction("CHOOSE SHAPE", "Select the highlight aperture style") {
+            choose("Bokeh shape", shapeNames) {
+                cfg.bokehShape = it
+                cfgDirty = true
+                shape.text = "BOKEH SHAPE · ${shapeNames[it]}"
+            }
+        })
+        enabled.setOnCheckedChangeListener { _, checked ->
+            cfg.bokehEnhancementEnabled = checked
+            cfgDirty = true
+            strength.isEnabled = checked
+            glow.isEnabled = checked
+        }
+        strength.isEnabled = enabled.isChecked
+        glow.isEnabled = enabled.isChecked
+        MaterialAlertDialogBuilder(this).setTitle("BOKEH ENHANCEMENT").setView(box).setNegativeButton("Done", null).show()
+    }
+
+    private fun showBackgroundColorShiftDialog() {
+        if (cfg.mode != 1 || !idle()) return
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+        }
+        val note = TextView(this).apply {
+            text = "The original subject colours are protected. These controls affect the background of saved photos only."
+            setTextColor(0xFFBDB8C7.toInt())
+            textSize = 12f
+            setPadding(0, 0, 0, dp(10))
+        }
+        box.addView(note)
+
+        val enabled = CheckBox(this).apply {
+            text = "Enable Background Colour Shift"
+            setTextColor(0xFFF3F0E8.toInt())
+            isChecked = cfg.backgroundColorShiftEnabled
+        }
+        box.addView(enabled)
+
+        fun addLabel(text: String): TextView = TextView(this).apply {
+            this.text = text
+            setTextColor(0xFFF3F0E8.toInt())
+            textSize = 12f
+            setPadding(0, dp(10), 0, 0)
+        }
+
+        val hueLabel = addLabel("BACKGROUND HUE · ${cfg.backgroundHueShift}°")
+        val hueSeek = SeekBar(this).apply {
+            max = 360
+            progress = (cfg.backgroundHueShift + 180).coerceIn(0, 360)
+        }
+        box.addView(hueLabel)
+        box.addView(hueSeek, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val satLabel = addLabel("BACKGROUND SATURATION · ${cfg.backgroundSaturation}%")
+        val satSeek = SeekBar(this).apply {
+            max = 200
+            progress = cfg.backgroundSaturation.coerceIn(0, 200)
+        }
+        box.addView(satLabel)
+        box.addView(satSeek, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val tempLabel = addLabel("BACKGROUND TEMPERATURE · ${cfg.backgroundTemperature}")
+        val tempSeek = SeekBar(this).apply {
+            max = 200
+            progress = (cfg.backgroundTemperature + 100).coerceIn(0, 200)
+        }
+        box.addView(tempLabel)
+        box.addView(tempSeek, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        fun updateEnabled() {
+            val on = enabled.isChecked
+            hueSeek.isEnabled = on
+            satSeek.isEnabled = on
+            tempSeek.isEnabled = on
+        }
+        enabled.setOnCheckedChangeListener { _, checked ->
+            cfg.backgroundColorShiftEnabled = checked
+            cfgDirty = true
+            updateEnabled()
+            if (cfg.photoFormat == 3) streamChanged() else applyLive()
+        }
+
+        hueSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                val v = value - 180
+                hueLabel.text = "BACKGROUND HUE · ${if (v > 0) "+" else ""}${v}°"
+                cfg.backgroundHueShift = v; cfgDirty = true
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        satSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                satLabel.text = "BACKGROUND SATURATION · ${value}%"
+                cfg.backgroundSaturation = value; cfgDirty = true
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        tempSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                val v = value - 100
+                tempLabel.text = "BACKGROUND TEMPERATURE · ${if (v > 0) "+" else ""}${v}"
+                cfg.backgroundTemperature = v; cfgDirty = true
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        val presets = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+        }
+        val natural = panelAction("NATURAL", "Gentle shift") {
+            hueSeek.progress = 204
+            satSeek.progress = 115
+            tempSeek.progress = 104
+            enabled.isChecked = true
+        }
+        val creative = panelAction("CREATIVE", "Stronger colour") {
+            hueSeek.progress = 270
+            satSeek.progress = 145
+            tempSeek.progress = 92
+            enabled.isChecked = true
+        }
+        presets.addView(natural, LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(0, dp(8), dp(4), 0) })
+        presets.addView(creative, LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(4), dp(8), 0, 0) })
+        box.addView(presets)
+        updateEnabled()
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("BACKGROUND COLOUR SHIFT")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Done", null)
+            .show()
+    }
+
     private fun applyLook(id: Int) {
         if (!idle()) return
         cfg.filterId = id
@@ -688,9 +965,9 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private fun toggleExposureControls() {
         if (!exposureControlsExpanded && zoomControlsExpanded) toggleZoomControls()
         exposureControlsExpanded = !exposureControlsExpanded
-        exposureControlsChip.text = if (exposureControlsExpanded) "EXP ◂" else "EXP ▸"
+        exposureControlsChip.text = if (exposureControlsExpanded) "••• ◂" else "•••"
         setActive(exposureControlsChip, exposureControlsExpanded)
-        val controls = listOf(rMode.box, rIso.box, rShutter.box, rWb.box, rAe.box)
+        val controls = listOf(rEv.box, rWb.box, rAe.box)
         if (exposureControlsExpanded) {
             controls.forEach { view ->
                 view.animate().cancel()
@@ -715,8 +992,8 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private fun toggleZoomControls() {
         if (!zoomControlsExpanded && exposureControlsExpanded) toggleExposureControls()
         zoomControlsExpanded = !zoomControlsExpanded
-        zoomControlsChip.text = fmtZoom(cam.zoom) + (if (zoomControlsExpanded) " ◂" else " ▸")
-        setActive(zoomControlsChip, zoomControlsExpanded)
+        zoomControlsChip.text = rackIndicator(if (zoomControlsExpanded) fmtZoom(cam.zoom) else "ZOOM", rackTarget == 0)
+        setActive(zoomControlsChip, false)
         zoomPresetChips.forEach { (value, chip) ->
             chip.animate().cancel()
             val supported = value >= cam.zoomRange.lower - 0.01f && value <= cam.zoomHi() + 0.01f
@@ -770,6 +1047,16 @@ class MainActivity : Activity(), CameraController.Callbacks {
         root.addView(peakView, lp(MATCH, MATCH, Gravity.CENTER))
         grid = GridOverlayView(this)
         root.addView(grid, lp(MATCH, MATCH, Gravity.CENTER))
+        // Brief dark dip confirms the instant the captured image is fully received.
+        // This layer matches the preview bounds and stays underneath all controls.
+        previewBlink = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            alpha = 0f
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+        }
+        root.addView(previewBlink, lp(MATCH, MATCH, Gravity.CENTER))
 
         falseLegend = TextView(this).apply {
             text = "FALSE COLOUR   purple <2%   blue shadows   green mid-grey   pink skin   yellow 90%+   red clipped"
@@ -832,6 +1119,32 @@ class MainActivity : Activity(), CameraController.Callbacks {
             visibility = View.GONE
         }
         root.addView(warn, lp(WRAP, WRAP, Gravity.TOP or Gravity.START, dp(14), dp(50), 0, 0))
+        smartIsoWarning = TextView(this).apply {
+            text = "Surroundings too dark, increasing ISO above 500."
+            setTextColor(RED)
+            textSize = 11f
+            setShadowLayer(3f, 0f, 0f, Color.BLACK)
+            visibility = View.GONE
+        }
+        drag("smartIsoWarning", smartIsoWarning, WRAP, WRAP, Gravity.TOP or Gravity.START, dp(14), dp(94))
+        facePortraitStatus = TextView(this).apply {
+            text = "Face detected — Tap to enable Portrait Mode."
+            setTextColor(Color.rgb(76, 220, 120))
+            textSize = 12f
+            setShadowLayer(3f, 0f, 0f, Color.BLACK)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                if (cfg.mode == 1 && cam.liveFaceCount in 1..2 && !cam.hasValidAutoPortraitConfirmation()) {
+                    cam.confirmAutoPortraitForFiveMinutes()
+                    updateSmartIsoWarning()
+                }
+            }
+            visibility = View.GONE
+        }
+        drag("facePortraitStatus", facePortraitStatus, WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, dp(16), 0, dp(16), dp(28))
         lockText = TextView(this).apply {
             setTextColor(AMBER)
             textSize = 13f
@@ -906,26 +1219,39 @@ class MainActivity : Activity(), CameraController.Callbacks {
         drag("focusTools", col, WRAP, WRAP, Gravity.END or Gravity.TOP, 0, dp(56), dp(76), 0)
 
         // ----- bottom stack: readouts + zoom pull + exposure pull -----
-        rMode = readout("EXPOSURE") {
-            cfg.manualExposure = !cfg.manualExposure
-            cam.clearAeLock()
-            applyLive()
+        rMode = readout("AUTO") {
+            if (cfg.mode == 1) {
+                choose("Photo exposure mode", listOf("AUTO", "SMART", "MANUAL")) { selected ->
+                    if (selected == 1 && !cam.smartIsoSupported) {
+                        toast("Smart mode needs manual sensor exposure support on this lens")
+                    } else {
+                        cfg.photoExposureMode = selected
+                        cfgDirty = true
+                        cam.clearAeLock()
+                        applyLive()
+                    }
+                }
+            } else {
+                cfg.manualExposure = !cfg.manualExposure
+                cam.clearAeLock()
+                applyLive()
+            }
         }
-        rIso = readout("ISO") { pickIso() }
-        rShutter = readout("SHUTTER") { pickShutter() }
+        rIso = readout("ISO") { if (manualExposureActive()) pickIso() else toast("Switch to MANUAL to edit ISO") }
+        rShutter = readout("SHUTTER") { if (manualExposureActive()) pickShutter() else toast("Switch to MANUAL to edit shutter speed") }
         rEv = readout("EV") { pickEv() }
         rAe = readout("AE LOCK") { cam.toggleAeLock() }
         rWb = readout("WB") { cam.toggleAwbLock() }
-        exposureControlsChip = chip("EXP ▸") { toggleExposureControls() }
+        exposureControlsChip = chip("•••") { toggleExposureControls() }
         val readRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        listOf(exposureControlsChip, rEv.box, rMode.box, rIso.box, rShutter.box, rWb.box, rAe.box).forEach { view ->
-            if (view !== exposureControlsChip) readBoxes.add(view)
+        listOf(rEv.box, rWb.box, rAe.box).forEach { view ->
+            readBoxes.add(view)
             readRow.addView(view, LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(dp(3), 0, dp(3), dp(3)) })
         }
-        listOf(rMode.box, rIso.box, rShutter.box, rWb.box, rAe.box).forEach { it.visibility = View.GONE }
+        listOf(rEv.box, rWb.box, rAe.box).forEach { it.visibility = View.GONE }
         val readScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(readRow, ViewGroup.LayoutParams(WRAP, WRAP))
@@ -981,14 +1307,14 @@ class MainActivity : Activity(), CameraController.Callbacks {
         expLabel.setOnClickListener { setRackTarget(1) }
         val expStrip = strip(expLabel, expSlider)
 
-        exposureSummary = TextView(this).apply {
-            text = "AUTO  ·  ISO --  ·  --"
-            setTextColor(0xFFF3F0E8.toInt())
-            textSize = 11f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = materialSurface(0xE6211F26.toInt(), 14, 0x5549454F)
+        exposureSummary = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            background = materialSurface(0xE6211F26.toInt(), 18, 0x5549454F)
+            setPadding(dp(8), dp(5), dp(8), dp(5))
+            listOf(exposureControlsChip, rMode.box, rIso.box, rShutter.box).forEach { item ->
+                addView(item, LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) })
+            }
         }
         val readouts = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1132,6 +1458,19 @@ class MainActivity : Activity(), CameraController.Callbacks {
         }
         root.addView(transitionCover, lp(MATCH, MATCH, Gravity.CENTER))
         setContentView(root)
+        root.post { showFirstRunLayoutTip() }
+    }
+
+    private fun showFirstRunLayoutTip() {
+        val prefs = getSharedPreferences("onboarding", MODE_PRIVATE)
+        if (prefs.getBoolean("layout_tip_seen", false)) return
+        prefs.edit().putBoolean("layout_tip_seen", true).apply()
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Personalise your layout")
+            .setMessage("Edit the controls to fit your screen. Open TOOLS, then choose “Edit layout” to move and resize the panels.")
+            .setPositiveButton("Open TOOLS") { _, _ -> popup(toolsChip, toolsItems()) }
+            .setNegativeButton("Later", null)
+            .show()
     }
 
     private fun beginCameraTransition() {
@@ -1155,7 +1494,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         if (cfg.mode == 1) {
             recBtn.background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                val saving = ::cam.isInitialized && (cam.busy || cam.jobs > 0 || longLeft >= 0)
+                val saving = ::cam.isInitialized && (cam.busy || cam.captureCooldownActive || longLeft >= 0)
                 setColor(if (saving) 0xFF9E9E9E.toInt() else Color.WHITE)
                 setStroke(dp(4), if (saving) 0xFFD0BCFF.toInt() else 0xFF424242.toInt())
             }
@@ -1178,7 +1517,11 @@ class MainActivity : Activity(), CameraController.Callbacks {
         if (!::zoomSlider.isInitialized || !::expSlider.isInitialized) return
         val p = isPortrait()
         val photo = cfg.mode == 1
-        val w = dp(if (p) 210 else 280)
+        val available = if (root.width > 0) root.width else resources.displayMetrics.widthPixels
+        // Reference screenshots: portrait slider occupies ~42% of the screen width;
+        // landscape slider occupies ~22%, leaving room for its label and rack controls.
+        val w = if (p) (available * 0.42f).roundToInt().coerceIn(dp(148), dp(190))
+                else (available * 0.22f).roundToInt().coerceIn(dp(180), dp(220))
         listOf(zoomSlider, expSlider).forEach {
             val l = it.layoutParams as LinearLayout.LayoutParams
             if (l.width != w) {
@@ -1293,41 +1636,77 @@ class MainActivity : Activity(), CameraController.Callbacks {
     /** Default positions for the current orientation (the user's own dragged positions are applied on top). */
     private fun applyOrientationLayout() {
         val p = isPortrait()
+        val density = resources.displayMetrics.density
+        val screenW = (root.width / density).coerceAtLeast(320f)
+        val screenH = (root.height / density).coerceAtLeast(320f)
+        fun sx(fraction: Float) = dp((screenW * fraction).roundToInt())
+        fun sy(fraction: Float) = dp((screenH * fraction).roundToInt())
+
         if (p) {
-            listOf("tool2x", "toolPeak", "toolFalse", "toolTorch", "toolTimer", "toolRotate").forEachIndexed { i, key -> setFrameLp(key, dp(70), WRAP, Gravity.START or Gravity.CENTER_VERTICAL, dp(6), dp(20 + i * 58), 0, 0) }
-            setFrameLp("focusSlider", dp(56), MATCH, Gravity.END, 0, dp(110), dp(6), dp(260))
-            setFrameLp("focusTools", WRAP, WRAP, Gravity.END or Gravity.TOP, 0, dp(110), dp(66), 0)
-            // A deliberate bottom dock: each control gets its own lane with enough
-            // vertical breathing room for its actual measured height.
-            setFrameLp("readouts", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(70), 0, 0, dp(235))
-            setFrameLp("zoomPanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(70), 0, 0, dp(160))
-            setFrameLp("exposurePanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(70), 0, 0, dp(85))
-            setFrameLp("rackPanel", dp(92), dp(104), Gravity.END or Gravity.BOTTOM, 0, 0, dp(74), dp(150))
+            // Portrait reference: tools form a fixed bottom-left vertical stack.
+            // Use BOTTOM gravity so their positions cannot drift with screen centre.
+            val portraitTools = if (cfg.mode == 1) {
+                listOf("tool2x", "toolPeak", "toolFalse", "toolTorch", "toolTimer")
+            } else {
+                listOf("tool2x", "toolPeak", "toolFalse", "toolTorch", "toolTimer", "toolRotate")
+            }
+            portraitTools.forEachIndexed { i, key ->
+                val bottom = sy(0.218f) + dp((portraitTools.lastIndex - i) * 40)
+                setFrameLp(key, dp(70), WRAP, Gravity.START or Gravity.BOTTOM, dp(6), 0, 0, bottom)
+            }
+            setFrameLp("focusSlider", dp(56), MATCH, Gravity.END, 0, sy(0.16f), dp(6), sy(0.275f))
+            setFrameLp("focusTools", WRAP, WRAP, Gravity.END or Gravity.TOP, 0, sy(0.16f), dp(66), 0)
+
+            // Three independent bottom lanes, matching the portrait reference proportions.
+            setFrameLp("readouts", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(8), 0, 0, sy(0.38f))
+            setFrameLp("zoomPanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(4), 0, 0, sy(0.139f))
+            setFrameLp("exposurePanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(4), 0, 0, sy(0.055f))
+            setFrameLp("rackPanel", dp(92), dp(104), Gravity.END or Gravity.BOTTOM, 0, 0, sx(0.067f), sy(0.096f))
             setFrameLp("rec", dp(64), dp(64), Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM, 0, 0, 0, dp(18))
             setFrameLp("thumb", dp(52), dp(52), Gravity.START or Gravity.BOTTOM, dp(20), 0, 0, dp(24))
             setFrameLp("mode", WRAP, WRAP, Gravity.END or Gravity.BOTTOM, 0, 0, dp(14), dp(32))
+            setFrameLp("smartIsoWarning", WRAP, WRAP, Gravity.TOP or Gravity.START, dp(14), dp(118), 0, 0)
+            setFrameLp("facePortraitStatus", WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, dp(16), 0, dp(16), dp(28))
         } else {
-            listOf("tool2x", "toolPeak", "toolFalse", "toolTorch", "toolTimer", "toolRotate").forEachIndexed { i, key -> setFrameLp(key, dp(70), WRAP, Gravity.START or Gravity.CENTER_VERTICAL, dp(8), dp(20 + i * 58), 0, 0) }
-            setFrameLp("focusSlider", dp(56), MATCH, Gravity.END, 0, dp(56), dp(10), dp(14))
-            setFrameLp("focusTools", WRAP, WRAP, Gravity.END or Gravity.TOP, 0, dp(56), dp(76), 0)
-            // Keep the three bottom control groups in separate, non-overlapping lanes.
-            setFrameLp("readouts", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(76), 0, 0, dp(190))
-            setFrameLp("zoomPanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(76), 0, 0, dp(125))
-            setFrameLp("exposurePanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, dp(76), 0, 0, dp(60))
-            setFrameLp("rackPanel", dp(92), dp(104), Gravity.END or Gravity.BOTTOM, 0, 0, dp(240), dp(60))
-            setFrameLp("rec", dp(64), dp(64), Gravity.END or Gravity.BOTTOM, 0, 0, dp(88), dp(16))
-            setFrameLp("thumb", dp(52), dp(52), Gravity.END or Gravity.BOTTOM, 0, 0, dp(166), dp(22))
-            setFrameLp("mode", WRAP, WRAP, Gravity.END or Gravity.BOTTOM, 0, 0, dp(70), dp(88))
+            // Landscape reference: tools are pinned below the top bar on the left.
+            listOf("tool2x", "toolPeak", "toolFalse", "toolRotate", "toolTimer", "toolTorch")
+                .forEachIndexed { i, key ->
+                    setFrameLp(key, dp(70), WRAP, Gravity.START or Gravity.TOP, dp(8), sy(0.135f) + dp(i * 42), 0, 0)
+                }
+            setFrameLp("focusSlider", dp(56), MATCH, Gravity.END, 0, sy(0.135f), dp(10), sy(0.034f))
+            setFrameLp("focusTools", WRAP, WRAP, Gravity.END or Gravity.TOP, 0, sy(0.135f), dp(76), 0)
+
+            // Landscape lanes are deliberately staggered to mirror the supplied screenshot.
+            setFrameLp("readouts", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, sx(0.32f), 0, 0, sy(0.105f))
+            setFrameLp("zoomPanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, sx(0.145f), 0, 0, sy(0.210f))
+            setFrameLp("exposurePanel", WRAP, WRAP, Gravity.START or Gravity.BOTTOM, sx(0.045f), 0, 0, sy(0.070f))
+            setFrameLp("rackPanel", dp(92), dp(104), Gravity.END or Gravity.BOTTOM, 0, 0, sx(0.078f), sy(0.180f))
+            setFrameLp("rec", dp(64), dp(64), Gravity.END or Gravity.BOTTOM, 0, 0, dp(160), dp(16))
+            setFrameLp("thumb", dp(52), dp(52), Gravity.END or Gravity.BOTTOM, 0, 0, dp(84), dp(22))
+            setFrameLp("mode", WRAP, WRAP, Gravity.END or Gravity.BOTTOM, 0, 0, sx(0.264f), dp(88))
+            setFrameLp("smartIsoWarning", WRAP, WRAP, Gravity.TOP or Gravity.START, dp(14), dp(72), 0, 0)
+            setFrameLp("facePortraitStatus", WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, dp(16), 0, dp(16), dp(28))
+        }
+
+        // The three primary exposure values have fixed, equal widths in both orientations.
+        listOf(rMode, rIso, rShutter).forEach {
+            val params = it.box.layoutParams as LinearLayout.LayoutParams
+            params.width = dp(if (p) 78 else 86)
+            params.height = dp(if (p) 42 else 48)
+            it.box.layoutParams = params
+            it.value.textSize = if (p) 12f else 14f
+            it.box.setPadding(dp(if (p) 3 else 8), dp(3), dp(if (p) 3 else 8), dp(3))
         }
         readBoxes.forEach {
-            val lpp = it.layoutParams as LinearLayout.LayoutParams
-            lpp.width = dp(if (p) 58 else 80)
-            it.layoutParams = lpp
+            val params = it.layoutParams as LinearLayout.LayoutParams
+            params.width = dp(if (p) 58 else 80)
+            it.layoutParams = params
         }
-        listOf(rMode, rIso, rShutter, rEv, rAe, rWb).forEach {
+        listOf(rEv, rAe, rWb).forEach {
             it.value.textSize = if (p) 12f else 14f
             it.box.setPadding(dp(if (p) 2 else 10), dp(3), dp(if (p) 2 else 10), dp(3))
         }
+        exposureSummary.orientation = LinearLayout.HORIZONTAL
         exposureControlsChip.textSize = if (p) 11f else 12f
         exposureControlsChip.setPadding(dp(if (p) 8 else 12), dp(7), dp(if (p) 8 else 12), dp(7))
         if (::zoomControlsChip.isInitialized) {
@@ -1337,19 +1716,28 @@ class MainActivity : Activity(), CameraController.Callbacks {
         applySliderWidths()
         zoomLabel.visibility = if (p) View.GONE else View.VISIBLE
         expLabel.visibility = if (p) View.GONE else View.VISIBLE
-        // chips (format / image / grid / tools) move to their own row in portrait so none are squeezed out
-        val par = chipRow.parent as? ViewGroup
-        if (p && par !== topRow2) {
-            par?.removeView(chipRow)
+
+        // Portrait gets a dedicated second menu row; landscape keeps all five menus in the header.
+        val topParams = topBar.layoutParams as FrameLayout.LayoutParams
+        topParams.topMargin = if (p) dp(40) else 0
+        topBar.layoutParams = topParams
+        val secondRowParams = topRow2.layoutParams as FrameLayout.LayoutParams
+        secondRowParams.topMargin = if (p) dp(80) else dp(44)
+        topRow2.layoutParams = secondRowParams
+
+        val parent = chipRow.parent as? ViewGroup
+        if (p && parent !== topRow2) {
+            parent?.removeView(chipRow)
             topRow2.addView(chipRow, FrameLayout.LayoutParams(MATCH, WRAP))
             topRow2.visibility = View.VISIBLE
-        } else if (!p && par !== topBar) {
-            par?.removeView(chipRow)
+        } else if (!p && parent !== topBar) {
+            parent?.removeView(chipRow)
             topBar.addView(chipRow, 2, LinearLayout.LayoutParams(0, WRAP, 1f))
             topRow2.visibility = View.GONE
         }
+
         (warn.layoutParams as FrameLayout.LayoutParams).topMargin = dp(if (p) 96 else 50)
-        (lockText.layoutParams as FrameLayout.LayoutParams).topMargin = dp(if (p) 118 else 72)
+        (lockText.layoutParams as FrameLayout.LayoutParams).topMargin = dp(if (p) 140 else 94)
         (falseLegend.layoutParams as FrameLayout.LayoutParams).topMargin = dp(if (p) 96 else 48)
         warn.requestLayout()
         lockText.requestLayout()
@@ -1398,8 +1786,8 @@ class MainActivity : Activity(), CameraController.Callbacks {
         // The previous layout schema stored overlapping panel coordinates. Rebase those
         // coordinates once so the new Material control dock starts from a clean layout.
         val prefs = layoutPrefs()
-        if (prefs.getInt("layout_schema", 0) < 2) {
-            prefs.edit().clear().putInt("layout_schema", 2).apply()
+        if (prefs.getInt("layout_schema", 0) < 3) {
+            prefs.edit().clear().putInt("layout_schema", 3).apply()
         }
         frames.forEach { f ->
             f.setPanelSizePercent(prefs.getInt("size_${f.key}", 50))
@@ -1460,6 +1848,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     }
 
     private fun videoImageItems(): List<Pair<String, () -> Unit>> = listOf(
+        "Contrast by lens: ${runCatching { cam.cameraLabel(cfg.cameraId) }.getOrDefault(cfg.cameraId)} · ${(cfg.videoContrastByLens[cfg.cameraId] ?: cfg.videoContrast).coerceIn(0, 100)}%" to { showVideoLensContrastPicker() },
         "Stabilization: ${when (cfg.stab) { 2 -> "EIS + OIS"; 1 -> "EIS only"; else -> "Off" }}" to {
             choose("Video stabilization", listOf("Off", "EIS only", "EIS + OIS")) {
                 cfg.stab = it
@@ -1509,7 +1898,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
             "Effects · Film Grain" to 16,
             "Effects · Anamorphic Flare" to 17,
             "Colour · Zeiss Colours (inspired)" to 18,
-            "Colour · Sony S-Cinetone (inspired)" to 27,
+            "Cinema · RED Komodo Cinema (inspired)" to 30,
         )
         val items = presets.map { (label, id) ->
             val title = (if (cfg.filterId == id) "✓ " else "") + label
@@ -1538,6 +1927,58 @@ class MainActivity : Activity(), CameraController.Callbacks {
                 if (cfg.mode == 0) streamChanged() else applyLive()
             }
         })
+    }
+
+    private fun showVideoContrastSlider(lensId: String = cfg.cameraId) {
+        if (!idle()) return
+        val lensName = runCatching { cam.cameraLabel(lensId) }.getOrDefault(lensId)
+        val currentContrast = (cfg.videoContrastByLens[lensId] ?: cfg.videoContrast).coerceIn(0, 100)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+        val label = TextView(this).apply {
+            text = "$lensName · VIDEO CONTRAST · ${currentContrast}%"
+            setTextColor(0xFFF3F0E8.toInt())
+            textSize = 12f
+        }
+        val seek = SeekBar(this).apply {
+            max = 100
+            progress = currentContrast
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
+                    label.text = "$lensName · VIDEO CONTRAST · ${value}%"
+                    if (fromUser) {
+                        cfg.videoContrastByLens[lensId] = value.coerceIn(0, 100)
+                        cfgDirty = true
+                    }
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) {}
+                override fun onStopTrackingTouch(bar: SeekBar?) {}
+            })
+        }
+        box.addView(label)
+        box.addView(seek, LinearLayout.LayoutParams(MATCH, WRAP))
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Video contrast · $lensName")
+            .setMessage("Saved separately for this lens and independently from photo contrast. 0% leaves the image unchanged.")
+            .setView(box)
+            .setPositiveButton("Done", null)
+            .setNeutralButton("Reset to 10%") { _, _ ->
+                cfg.videoContrastByLens[lensId] = 10
+                cfgDirty = true
+                toast("$lensName video contrast reset to 10%")
+            }
+            .show()
+    }
+
+    private fun showVideoLensContrastPicker() {
+        val ids = cam.cameraIds
+        if (ids.isEmpty()) return
+        choose("Video contrast · choose lens", ids.map { id ->
+            val name = runCatching { cam.cameraLabel(id) }.getOrDefault(id)
+            "$name · ${(cfg.videoContrastByLens[id] ?: cfg.videoContrast).coerceIn(0, 100)}%"
+        }) { index -> showVideoContrastSlider(ids[index]) }
     }
 
     private fun showPhotoContrastSlider(lensId: String = cfg.cameraId) {
@@ -1575,10 +2016,10 @@ class MainActivity : Activity(), CameraController.Callbacks {
             .setMessage("Saved separately for this lens. 0% leaves the image unchanged.")
             .setView(box)
             .setPositiveButton("Done", null)
-            .setNeutralButton("Reset to 40%") { _, _ ->
-                cfg.photoContrastByLens[lensId] = 40
+            .setNeutralButton("Reset to 10%") { _, _ ->
+                cfg.photoContrastByLens[lensId] = 10
                 cfgDirty = true
-                toast("$lensName photo contrast reset to 40%")
+                toast("$lensName photo contrast reset to 10%")
             }
             .show()
     }
@@ -1594,11 +2035,6 @@ class MainActivity : Activity(), CameraController.Callbacks {
 
     private fun photoImageItems(): List<Pair<String, () -> Unit>> = listOf(
         "Contrast by lens: ${runCatching { cam.cameraLabel(cfg.cameraId) }.getOrDefault(cfg.cameraId)} · ${(cfg.photoContrastByLens[cfg.cameraId] ?: cfg.photoContrast).coerceIn(0, 100)}%" to { showLensContrastPicker() },
-        "Smart ISO cap: ${if (cfg.smartIso) "500" else "Off"}" to {
-            cfg.smartIso = !cfg.smartIso
-            cfgDirty = true
-            toast(if (cfg.smartIso) "Smart ISO enabled · maximum ISO 500" else "Smart ISO disabled")
-        },
         "Fast moving objects: ${if (cfg.fastMovingObjects) "On" else "Off"} · Main lens only" to {
             if (cfg.cameraId != "0") {
                 toast("Select the Main 1× lens to use Fast Moving Objects")
@@ -1732,12 +2168,18 @@ class MainActivity : Activity(), CameraController.Callbacks {
                 applyLive()
             }
         },
-        "Laptop monitor (Wi-Fi / USB): ${if (monitor != null) "On \u2014 tap for connection" else "Off"}" to { toggleMonitor() },
-        "USB monitoring commands (Mac)" to { showUsbCommands() },
+        "Laptop monitor (Wi-Fi): ${if (monitor != null) "On — tap for connection" else "Off"}" to { toggleMonitor() },
+        "Settings guide" to { SettingsGuide.show(this) },
         "Dolly Zoom (linked zoom + focus): ${if (zoomLinked) "On" else "Off"}" to {
             zoomLinked = !zoomLinked
             refreshUi()
             toast(if (zoomLinked) "Dolly Zoom enabled: set zoom A/B and focus A/B, then run the zoom rack" else "Dolly Zoom disabled")
+        },
+        "Chromatic aberration correction: ${if (cfg.chromaticAberrationCorrection) "On" else "Off"}" to {
+            cfg.chromaticAberrationCorrection = !cfg.chromaticAberrationCorrection
+            cfgDirty = true
+            applyLive()
+            toast("Chromatic aberration ISP correction ${if (cfg.chromaticAberrationCorrection) "enabled" else "disabled"}")
         },
         "Haptic feedback: ${if (cfg.haptics) "On" else "Off"}" to {
             cfg.haptics = !cfg.haptics
@@ -1746,48 +2188,8 @@ class MainActivity : Activity(), CameraController.Callbacks {
             refreshUi()
         },
         "Edit layout" to { setEditing(true) },
-        "Phone capabilities" to { showCapabilities() },
-        "Export main sensor calibration report" to { exportSensorCalibrationReport() }
+        "Phone capabilities" to { showCapabilities() }
     )
-
-    /**
-     * Exports a machine-readable Camera2 calibration report to the public Downloads
-     * collection so it can be uploaded to the Iris-Cam-Test repository.
-     */
-    private fun exportSensorCalibrationReport() {
-        if (cfg.cameraId != "0") {
-            toast("Select Main 1x (camera ID 0) before exporting calibration data")
-            return
-        }
-        toast("Collecting main sensor calibration data…")
-        Thread {
-            var uri: Uri? = null
-            try {
-                val json = cam.sensorDiagnosticsJson()
-                val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
-                    .format(java.util.Date())
-                val filename = "IrisCam_MainSensor_Calibration_$stamp.json"
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/IrisCamCalibration")
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
-                uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: throw IllegalStateException("Android couldn't create the report file")
-                contentResolver.openOutputStream(uri!!, "w")?.use { stream ->
-                    stream.write(json.toByteArray(Charsets.UTF_8))
-                    stream.flush()
-                } ?: throw IllegalStateException("Couldn't write the report file")
-                val complete = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-                contentResolver.update(uri!!, complete, null, null)
-                runOnUiThread { toast("Calibration report saved: Downloads/IrisCamCalibration/$filename") }
-            } catch (e: Exception) {
-                uri?.let { runCatching { contentResolver.delete(it, null, null) } }
-                runOnUiThread { toast("Calibration export failed: ${e.message ?: "unknown error"}") }
-            }
-        }.start()
-    }
 
     // ---------- refresh ----------
 
@@ -1799,7 +2201,18 @@ class MainActivity : Activity(), CameraController.Callbacks {
         setActive(filtersChip, cfg.filterId != 0)
         setActive(gridChip, cfg.grid != 0)
         setActive(toolsChip, false)
-        modeChip.text = if (photo) "PHOTO MODE" else "VIDEO MODE"
+        modeChip.text = ""
+        modeChip.contentDescription = if (photo) "Switch to video mode" else "Switch to photo mode"
+        modeChip.textSize = 25f
+        modeChip.setPadding(dp(10), dp(4), dp(10), dp(4))
+        modeChip.minWidth = dp(48)
+        modeChip.minHeight = dp(48)
+        modeChip.gravity = Gravity.CENTER
+        modeChip.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            null, null,
+            if (photo) CameraModeIconDrawable(this, true) else CameraModeIconDrawable(this, false),
+            null
+        )
         setActive(modeChip, false)
         val pullVis = if (photo) View.GONE else View.VISIBLE
         if (::rackPanel.isInitialized) rackPanel.visibility = pullVis
@@ -1810,7 +2223,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         zoomControlsChip.visibility = if (photo) View.GONE else View.VISIBLE
         if (photo && zoomControlsExpanded) {
             zoomControlsExpanded = false
-            zoomControlsChip.text = "ZOOM ▸"
+            zoomControlsChip.text = rackIndicator("ZOOM", rackTarget == 0)
             setActive(zoomControlsChip, false)
         }
         // Focus tools expand downward from AF only while manual focus is active.
@@ -1850,8 +2263,8 @@ class MainActivity : Activity(), CameraController.Callbacks {
         zoomTime.text = "${zoomSeconds}s"
         setActive(zoomTime, false)
         setActive(zoomLink, zoomLinked)
-        zoomLabel.text = "ZOOM"
-        zoomControlsChip.text = fmtZoom(cam.zoom) + (if (zoomControlsExpanded) " ◂" else " ▸")
+        zoomLabel.text = rackIndicator("ZOOM", rackTarget == 0)
+        zoomControlsChip.text = rackIndicator(if (zoomControlsExpanded) fmtZoom(cam.zoom) + " ◂" else "ZOOM", rackTarget == 0)
         setActive(zoomControlsChip, zoomControlsExpanded)
         expGo.text = if (expToB) "\u25B6 A\u2192B" else "\u25B6 B\u2192A"
         setActive(expGo, false)
@@ -1873,12 +2286,27 @@ class MainActivity : Activity(), CameraController.Callbacks {
 
         syncExpSlider()
         refreshReadouts()
+        updateSmartIsoWarning()
+    }
+
+    private fun updateSmartIsoWarning() {
+        val show = cfg.mode == 1 && cfg.photoExposureMode == 1 && cam.smartIsoNeedsHigh()
+        smartIsoWarning.visibility = if (show) View.VISIBLE else View.GONE
+        val eligibleFaceCount = cam.liveFaceCount in 1..2
+        val confirmed = cam.hasValidAutoPortraitConfirmation()
+        facePortraitStatus.text = if (confirmed) {
+            "Face detected, portrait mode at 50% active."
+        } else {
+            "Face detected — Tap to enable Portrait Mode."
+        }
+        facePortraitStatus.visibility = if (cfg.mode == 1 && eligibleFaceCount) View.VISIBLE else View.GONE
     }
 
     private fun refreshReadouts() {
-        val manual = cfg.manualExposure
-        setT(rMode.value, if (manual) "MANUAL" else "AUTO")
-        setC(rMode.value, if (manual) AMBER else Color.WHITE)
+        val manual = manualExposureActive()
+        val modeLabel = if (cfg.mode == 1) photoExposureModeLabel() else if (manual) "MANUAL" else "AUTO"
+        setT(rMode.value, modeLabel)
+        setC(rMode.value, if (modeLabel == "AUTO") Color.WHITE else AMBER)
         val iso = if (manual) cfg.iso else cam.liveIso
         setT(rIso.value, if (iso > 0) "$iso" else "--")
         setC(rIso.value, if (manual) AMBER else Color.WHITE)
@@ -1892,18 +2320,20 @@ class MainActivity : Activity(), CameraController.Callbacks {
         setC(rWb.value, if (cam.awbLock) AMBER else Color.WHITE)
         val shownIso = if (manual) cfg.iso else cam.liveIso
         val shownShutter = if (manual) cfg.shutterDenom else cam.liveShutterDenom
-        val exposureMode = if (manual) "PRO" else "AUTO"
-        val exposureParts = mutableListOf(exposureMode)
-        if (shownIso > 0) exposureParts.add("ISO $shownIso")
-        if (shownShutter > 0) exposureParts.add("1/$shownShutter s")
-        if (!manual) exposureParts.add("%+.1f EV".format(cfg.ev * cam.evStepEv))
-        setT(exposureSummary, exposureParts.joinToString("  ·  "))
-        setC(exposureSummary, if (manual) AMBER else 0xFFF3F0E8.toInt())
+        setT(rMode.value, if (cfg.mode == 1) photoExposureModeLabel() else if (manual) "MANUAL" else "AUTO")
+        setC(rMode.value, if (manual || (cfg.mode == 1 && cfg.photoExposureMode == 1)) AMBER else Color.WHITE)
+        setT(rIso.value, if (shownIso > 0) shownIso.toString() else "--")
+        setC(rIso.value, if (manual) AMBER else Color.WHITE)
+        setT(rShutter.value, if (shownShutter > 0) "1/$shownShutter" else "--")
+        setC(rShutter.value, if (manual) AMBER else Color.WHITE)
+        rIso.box.alpha = if (manual) 1f else 0.72f
+        rShutter.box.alpha = if (manual) 1f else 0.72f
+        exposureSummary.orientation = LinearLayout.HORIZONTAL
     }
 
     /** Re-points the exposure slider at EV (Auto) or ISO (Manual). */
     private fun syncExpSlider() {
-        val manual = cfg.manualExposure
+        val manual = manualExposureActive()
         if (expSliderManual != manual) {
             expSliderManual = manual
             expSlider.markA = null
@@ -1931,6 +2361,8 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private fun switchLens(id: String) {
         if (!idle()) return
         cfg.cameraId = id
+        cfg.photoW = 0
+        cfg.photoH = 0
         store.save("last", cfg)
         cam.reopen()
         refreshUi()
@@ -2238,6 +2670,8 @@ class MainActivity : Activity(), CameraController.Callbacks {
         if (ids.isEmpty()) return
         choose("Lens", ids.map { cam.cameraLabel(it) }) {
             cfg.cameraId = ids[it]
+            cfg.photoW = 0
+            cfg.photoH = 0
             store.save("last", cfg)
             beginCameraTransition()
             cam.reopen()
@@ -2255,8 +2689,8 @@ class MainActivity : Activity(), CameraController.Callbacks {
     }
 
     private fun pickEv() {
-        if (cfg.manualExposure) {
-            toast("EV is for Auto exposure")
+        if (manualExposureActive()) {
+            toast("EV is unavailable in Manual exposure")
             return
         }
         val o = cam.evOptions()
@@ -2267,7 +2701,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     }
 
     private fun pickShutter() {
-        if (!cfg.manualExposure) {
+        if (!manualExposureActive()) {
             toast("Switch EXPOSURE to Manual to set the shutter")
             return
         }
@@ -2280,7 +2714,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     }
 
     private fun pickIso() {
-        if (!cfg.manualExposure) {
+        if (!manualExposureActive()) {
             toast("Switch EXPOSURE to Manual to set ISO")
             return
         }
@@ -2339,12 +2773,23 @@ class MainActivity : Activity(), CameraController.Callbacks {
         refreshUi()
     }
 
+    private fun rackIndicator(label: String, active: Boolean): CharSequence {
+        if (!active) return label
+        return SpannableString("$label  ●").apply {
+            setSpan(ForegroundColorSpan(0xFFD0BCFF.toInt()), length - 1, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
     private fun setRackTarget(target: Int) {
         rackTarget = target.coerceIn(0, 1)
         if (!::rackTargetLabel.isInitialized) return
         rackTargetLabel.text = if (rackTarget == 0) "ZOOM" else "EXPOSURE"
-        setActive(zoomLabel, rackTarget == 0)
-        setActive(expLabel, rackTarget == 1)
+        zoomLabel.text = rackIndicator("ZOOM", rackTarget == 0)
+        expLabel.text = rackIndicator("EXPOSURE", rackTarget == 1)
+        zoomControlsChip.text = rackIndicator("ZOOM", rackTarget == 0)
+        exposureControlsChip.text = "•••"
+        setActive(zoomLabel, false)
+        setActive(expLabel, false)
     }
 
     private fun setSharedRackMark(isA: Boolean) {
@@ -2353,7 +2798,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
             zoomSlider.invalidate()
             toast("Zoom " + (if (isA) "A" else "B") + " set")
         } else {
-            val value = if (cfg.manualExposure) cfg.iso.toFloat() else cfg.ev * cam.evStepEv
+            val value = if (manualExposureActive()) cfg.iso.toFloat() else cfg.ev * cam.evStepEv
             if (isA) expSlider.markA = value else expSlider.markB = value
             expSlider.invalidate()
             toast("Exposure " + (if (isA) "A" else "B") + " set")
@@ -2382,8 +2827,12 @@ class MainActivity : Activity(), CameraController.Callbacks {
         refreshUi()
     }
 
+    private fun manualExposureActive(): Boolean = if (cfg.mode == 1) cfg.photoExposureMode == 2 else cfg.manualExposure
+
+    private fun photoExposureModeLabel(): String = when (cfg.photoExposureMode) { 1 -> "SMART"; 2 -> "MANUAL"; else -> "AUTO" }
+
     private fun applyExposureValue(v: Float) {
-        if (cfg.manualExposure) {
+        if (manualExposureActive()) {
             val ni = v.roundToInt().coerceIn(cam.isoRange.lower, cam.isoRange.upper)
             if (ni == cfg.iso) return
             cfg.iso = ni
@@ -2414,7 +2863,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         val to = if (expToB) b else a
         expToB = !expToB
         cancelExpPull()
-        val manual = cfg.manualExposure
+        val manual = manualExposureActive()
         expAnim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = rackSeconds * 1000L
             interpolator = LinearInterpolator()
@@ -2472,17 +2921,23 @@ class MainActivity : Activity(), CameraController.Callbacks {
     }
 
     private fun takePhotoWithSmartIso() {
-        if (cfg.smartIso && !cfg.manualExposure && cfg.scene == 0 && !cfg.fastMovingObjects && cfg.flashMode == 0 && cam.manualSensor && cam.smartIsoNeedsHigh()) {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Too dark")
-                .setMessage("The scene needs more exposure than 1/20 s at ISO 500. Allow ISO above 500 for this capture?")
-                .setNegativeButton("Keep ISO ≤500") { _, _ -> cam.takePhoto(false) }
-                .setPositiveButton("Allow higher ISO once") { _, _ -> cam.takePhoto(true) }
-                .setOnCancelListener { }
-                .show()
-        } else {
+        if (cfg.photoExposureMode != 1) {
             cam.takePhoto(false)
+            return
         }
+        if (!cam.smartIsoSupported) {
+            toast("Smart mode isn't supported on this lens. Switch to AUTO or choose a supported lens.")
+            refreshUi()
+            return
+        }
+        if (cfg.scene != 0 || cfg.fastMovingObjects || cfg.flashMode != 0) {
+            toast("Smart exposure needs Normal scene, flash off and Fast Moving Objects off")
+            cam.takePhoto(false)
+            return
+        }
+        updateSmartIsoWarning()
+        // The capture controller raises ISO automatically after reaching 1/33 s.
+        cam.takePhoto(false)
     }
 
     private fun fire() {
@@ -2837,6 +3292,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
                 slider.setFraction((cam.liveFocus / cam.minFocusDiopters).coerceIn(0f, 1f))
             }
             refreshReadouts()
+            updateSmartIsoWarning()
             if (falseOn && !cam.recording) sampleFalseColor()
             if (cfg.peak > 0) samplePeaking()
             if (n % 8 == 1) updateWarnings()
@@ -2914,20 +3370,17 @@ class MainActivity : Activity(), CameraController.Callbacks {
     // ---------- Wi-Fi monitor ----------
 
     private fun localIp(): String? {
-        var fallback: String? = null
+        // Advertise only the Wi-Fi interface; other network adapters are not supported.
         try {
             for (ni in NetworkInterface.getNetworkInterfaces()) {
-                if (!ni.isUp || ni.isLoopback) continue
+                if (!ni.isUp || ni.isLoopback || !ni.name.startsWith("wlan")) continue
                 for (a in ni.inetAddresses) {
-                    if (a is Inet4Address && !a.isLoopbackAddress) {
-                        if (ni.name.startsWith("wlan")) return a.hostAddress
-                        if (fallback == null) fallback = a.hostAddress
-                    }
+                    if (a is Inet4Address && !a.isLoopbackAddress) return a.hostAddress
                 }
             }
         } catch (_: Exception) {
         }
-        return fallback
+        return null
     }
 
     private fun copyToClipboard(label: String, text: String) {
@@ -2961,32 +3414,6 @@ class MainActivity : Activity(), CameraController.Callbacks {
         parent.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
     }
 
-    private fun showUsbCommands() {
-        val m = monitor
-        val port = m?.port ?: 8080
-        val usbLocalPort = 18080
-        val url = if (m != null) "http://localhost:$usbLocalPort/?pin=${m.pin}" else "http://localhost:$usbLocalPort"
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), dp(4))
-        }
-        TextView(this).apply {
-            text = "Connect your phone to the Mac with USB debugging enabled. Start Laptop Monitor first to get its live PIN."
-            setTextColor(Color.WHITE)
-            textSize = 13f
-        }.also { content.addView(it) }
-        addCopyRow(content, "ADB devices command", "adb devices")
-        addCopyRow(content, "ADB reverse command", "adb reverse tcp:$usbLocalPort tcp:$port")
-        addCopyRow(content, "Laptop monitor URL", url)
-        addCopyRow(content, "Disconnect command", "adb reverse --remove tcp:$usbLocalPort")
-        MaterialAlertDialogBuilder(this)
-            .setTitle("USB monitoring on Mac")
-            .setView(content)
-            .setNegativeButton(if (m != null) "Turn off monitor" else "Close") { _, _ -> if (m != null) stopMonitor() }
-            .setPositiveButton("Done", null)
-            .show()
-    }
-
     private fun showMonitorInfo() {
         val m = monitor ?: return
         val ip = localIp()
@@ -2995,7 +3422,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
             setPadding(dp(20), dp(8), dp(20), dp(4))
         }
         TextView(this).apply {
-            text = "Laptop camera monitor · PIN ${m.pin}\n\nThe feed is served locally on your network or through USB ADB."
+            text = "Laptop camera monitor · PIN ${m.pin}\n\nConnect your Mac and phone to the same Wi-Fi network, then open the URL below in your browser."
             setTextColor(Color.WHITE)
             textSize = 13f
         }.also { content.addView(it) }
@@ -3008,11 +3435,6 @@ class MainActivity : Activity(), CameraController.Callbacks {
                 textSize = 12f
             }.also { content.addView(it) }
         }
-        addCopyRow(content, "ADB devices command", "adb devices")
-        val usbLocalPort = 18080
-        addCopyRow(content, "ADB reverse command", "adb reverse tcp:$usbLocalPort tcp:${m.port}")
-        addCopyRow(content, "USB monitor URL", "http://localhost:$usbLocalPort/?pin=${m.pin}")
-        addCopyRow(content, "Disconnect command", "adb reverse --remove tcp:$usbLocalPort")
         MaterialAlertDialogBuilder(this)
             .setTitle("Laptop camera monitor")
             .setView(content)
@@ -3039,10 +3461,15 @@ class MainActivity : Activity(), CameraController.Callbacks {
             showMonitorInfo()
             return
         }
+        val wifiIp = localIp()
+        if (wifiIp == null) {
+            toast("Connect to Wi-Fi before starting the laptop monitor")
+            return
+        }
         val pin = (1000 + java.util.Random().nextInt(9000)).toString()
         val m = MonitorServer(monitorHost, pin)
-        if (!m.start()) {
-            toast("Couldn't start the monitor")
+        if (!m.start(InetAddress.getByName(wifiIp))) {
+            toast("Couldn't start the Wi-Fi monitor")
             return
         }
         monitor = m
@@ -3139,7 +3566,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         override fun page(): ByteArray = assets.open("monitor.html").use { it.readBytes() }
 
         override fun stateJson(): String {
-            val manual = cfg.manualExposure
+            val manual = manualExposureActive()
             val o = JSONObject()
             o.put("rec", cam.recording)
             val s = if (cam.recording) (SystemClock.elapsedRealtime() - recStart) / 1000 else 0L
@@ -3283,6 +3710,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         falseView.layoutParams = lp(vw, vh, Gravity.CENTER)
         peakView.layoutParams = lp(vw, vh, Gravity.CENTER)
         grid.layoutParams = lp(vw, vh, Gravity.CENTER)
+        previewBlink.layoutParams = lp(vw, vh, Gravity.CENTER)
         cam.refreshTransform()
     }
 
@@ -3304,6 +3732,18 @@ class MainActivity : Activity(), CameraController.Callbacks {
         refreshUi()
     }
 
+    override fun onPhotoCaptured() {
+        if (!::previewBlink.isInitialized || cfg.mode != 1) return
+        previewBlink.animate().cancel()
+        previewBlink.visibility = View.VISIBLE
+        previewBlink.alpha = 0.62f
+        previewBlink.animate()
+            .alpha(0f)
+            .setDuration(130L)
+            .withEndAction { previewBlink.visibility = View.GONE }
+            .start()
+    }
+
     override fun onPhotoSaved(uri: Uri?) {
         loadLatestClip()
     }
@@ -3319,7 +3759,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     }
 
     override fun onZoomChanged(z: Float) {
-        zoomLabel.text = "ZOOM " + fmtZoom(z)
+        zoomLabel.text = rackIndicator("ZOOM", rackTarget == 0)
         zoomSlider.setZoomSilently(z)
         setActive(t2x, z >= 1.9f)
     }
