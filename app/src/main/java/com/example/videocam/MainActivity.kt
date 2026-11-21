@@ -689,7 +689,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
     private fun showLooksDialog() {
         val groups = listOf(
             "Natural" to listOf(0),
-            "Inspired" to listOf(18, 10, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30),
+            "Inspired" to listOf(27, 29, 28, 31),
             "Cinematic" to listOf(2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 1)
         )
         val names = Look.FILTER_NAMES
@@ -738,7 +738,44 @@ class MainActivity : Activity(), CameraController.Callbacks {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }, LinearLayout.LayoutParams(MATCH, WRAP))
-        MaterialAlertDialogBuilder(this).setTitle("LOOKS").setView(box).setNegativeButton("Done", null).show()
+
+        val chromaHeading = TextView(this).apply {
+            text = "RGB CHROMA · 100% = neutral"
+            setTextColor(0xFFF3F0E8.toInt()); textSize = 12f
+            setPadding(0, dp(18), 0, dp(4))
+        }
+        box.addView(chromaHeading)
+        fun addChromaSlider(title: String, initial: Int, update: (Int) -> Unit) {
+            val valueLabel = TextView(this).apply {
+                text = "$title · $initial%"
+                setTextColor(0xFFF3F0E8.toInt()); textSize = 12f
+                setPadding(0, dp(8), 0, 0)
+            }
+            box.addView(valueLabel)
+            box.addView(SeekBar(this).apply {
+                max = 200
+                progress = initial.coerceIn(0, 200)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                        valueLabel.text = "$title · $value%"
+                        if (fromUser) {
+                            update(value)
+                            cfgDirty = true
+                            applyLive()
+                        }
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            }, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        addChromaSlider("RED", cfg.redChromaPercent) { cfg.redChromaPercent = it }
+        addChromaSlider("GREEN", cfg.greenChromaPercent) { cfg.greenChromaPercent = it }
+        addChromaSlider("BLUE", cfg.blueChromaPercent) { cfg.blueChromaPercent = it }
+
+        MaterialAlertDialogBuilder(this).setTitle("LOOKS")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Done", null).show()
     }
 
     private fun showPortraitPhotoModeDialog() {
@@ -3308,6 +3345,9 @@ class MainActivity : Activity(), CameraController.Callbacks {
 
     private var appliedPreviewFilterId = Int.MIN_VALUE
     private var appliedPreviewFilterIntensity = Int.MIN_VALUE
+    private var appliedPreviewRedChroma = Int.MIN_VALUE
+    private var appliedPreviewGreenChroma = Int.MIN_VALUE
+    private var appliedPreviewBlueChroma = Int.MIN_VALUE
     private var previewFilterWarningShown = false
 
     private fun applyBwLook() {
@@ -3318,14 +3358,24 @@ class MainActivity : Activity(), CameraController.Callbacks {
         // use the strength belonging to the active mode, not always the video value.
         val intensity = if (cfg.mode == 1) cfg.photoFilterIntensity else cfg.filterIntensity
         if (appliedPreviewFilterId == cfg.filterId &&
-            appliedPreviewFilterIntensity == intensity) return
+            appliedPreviewFilterIntensity == intensity &&
+            appliedPreviewRedChroma == cfg.redChromaPercent &&
+            appliedPreviewGreenChroma == cfg.greenChromaPercent &&
+            appliedPreviewBlueChroma == cfg.blueChromaPercent) return
         try {
-            val paint = if (cfg.filterId > 0) Paint().apply {
-                colorFilter = Look.previewFilter(cfg.filterId, intensity)
+            val hasRgbTrim = cfg.redChromaPercent != 100 || cfg.greenChromaPercent != 100 || cfg.blueChromaPercent != 100
+            val paint = if (cfg.filterId > 0 || hasRgbTrim) Paint().apply {
+                colorFilter = Look.previewFilter(
+                    cfg.filterId, intensity,
+                    cfg.redChromaPercent, cfg.greenChromaPercent, cfg.blueChromaPercent
+                )
             } else null
             tv.setLayerPaint(paint)
             appliedPreviewFilterId = cfg.filterId
             appliedPreviewFilterIntensity = intensity
+            appliedPreviewRedChroma = cfg.redChromaPercent
+            appliedPreviewGreenChroma = cfg.greenChromaPercent
+            appliedPreviewBlueChroma = cfg.blueChromaPercent
         } catch (e: RuntimeException) {
             runCatching { tv.setLayerPaint(null) }
             appliedPreviewFilterId = cfg.filterId
