@@ -741,7 +741,7 @@ class MainActivity : Activity(), CameraController.Callbacks {
         }, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val chromaHeading = TextView(this).apply {
-            text = "RGB CHROMA · 100% = neutral"
+            text = "RGB CHROMA · 100% = look baseline"
             setTextColor(0xFFF3F0E8.toInt()); textSize = 12f
             setPadding(0, dp(18), 0, dp(4))
         }
