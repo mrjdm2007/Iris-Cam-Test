@@ -174,7 +174,8 @@ object Look {
         "Hasselblad Natural Colour (inspired)", "Hasselblad Portrait (inspired)", "Hasselblad Vivid (inspired)",
         "Fujifilm Classic Chrome (inspired)", "Fujifilm Velvia (inspired)", "Fujifilm Astia (inspired)",
         "Fujifilm Pro Neg (inspired)", "Fujifilm Nostalgic Neg (inspired)", "Sony S-Cinetone (inspired)",
-        "Panasonic Lumix Cinelike D (inspired)", "Nikon Natural Colour (inspired)", "RED Komodo Cinema (inspired)"
+        "Panasonic Lumix Cinelike D (inspired)", "Nikon Natural Colour (inspired)", "RED Komodo Cinema (inspired)",
+        "ARRI Alexa 35 (inspired)"
     )
 
     private fun filterMatrix(id: Int): ColorMatrix {
@@ -245,14 +246,44 @@ object Look {
                 -0.025f, 0.02f, 1.06f, 0f, 3f,
                 0f, 0f, 0f, 1f, 0f
             )) // RED Komodo-inspired cinema grade: restrained saturation, balanced skin, subtle cool shadows
+            31 -> ColorMatrix(floatArrayOf(
+                1.025f, -0.012f, -0.013f, 0f, 1.5f,
+                -0.006f, 1.018f, -0.012f, 0f, 0.5f,
+                -0.012f, 0.014f, 0.998f, 0f, 2f,
+                0f, 0f, 0f, 1f, 0f
+            )).apply { postConcat(basic(0.97f, 1.00f, 0f, 0f, 0f)) } // ARRI Alexa 35-inspired neutral cinema rendering; approximation, not an official ARRI transform
             else -> ColorMatrix()
         }
     }
 
-    private fun intensityMatrix(id: Int, intensity: Int, reduceRedChroma: Boolean = true): ColorMatrix {
+    private fun chromaMatrix(redPercent: Int, greenPercent: Int, bluePercent: Int): ColorMatrix {
+        val luma = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
+        val scale = floatArrayOf(
+            redPercent.coerceIn(0, 200) / 100f,
+            greenPercent.coerceIn(0, 200) / 100f,
+            bluePercent.coerceIn(0, 200) / 100f
+        )
+        val values = FloatArray(20)
+        for (row in 0..2) {
+            for (col in 0..2) {
+                values[row * 5 + col] = (if (row == col) scale[row] else 0f) +
+                    (1f - scale[row]) * luma[col]
+            }
+        }
+        values[18] = 1f
+        return ColorMatrix(values)
+    }
+
+    private fun intensityMatrix(
+        id: Int,
+        intensity: Int,
+        reduceRedChroma: Boolean = true,
+        redPercent: Int = 100,
+        greenPercent: Int = 100,
+        bluePercent: Int = 100
+    ): ColorMatrix {
         val target = filterMatrix(id).array
-        // Retain 83% of red-channel chroma (a 17% reduction) for every selected look,
-        // including Sony S-Cinetone. Natural (ID 0) remains neutral.
+        // Preserve the established 17% red-chroma trim for photo/preview looks.
         if (reduceRedChroma && id > 0) {
             val original = target.copyOf()
             for (i in 0..4) {
@@ -262,12 +293,18 @@ object Look {
         }
         val identity = ColorMatrix().array
         val amount = intensity.coerceIn(0, 100) / 100f
-        return ColorMatrix(FloatArray(20) { i -> identity[i] + (target[i] - identity[i]) * amount })
+        val result = ColorMatrix(FloatArray(20) { i -> identity[i] + (target[i] - identity[i]) * amount })
+        // User RGB chroma trims are applied after the selected look and remain independent of exposure/contrast.
+        result.postConcat(chromaMatrix(redPercent, greenPercent, bluePercent))
+        return result
     }
 
-    /** Preview-compatible colour grade. TextureView preview only; video encoder output is not modified here. */
-    fun previewFilter(id: Int, intensity: Int): ColorMatrixColorFilter =
-        ColorMatrixColorFilter(intensityMatrix(id, intensity))
+    /** Preview-compatible colour grade. */
+    fun previewFilter(
+        id: Int, intensity: Int,
+        redPercent: Int = 100, greenPercent: Int = 100, bluePercent: Int = 100
+    ): ColorMatrixColorFilter =
+        ColorMatrixColorFilter(intensityMatrix(id, intensity, redPercent = redPercent, greenPercent = greenPercent, bluePercent = bluePercent))
 
     /** 4x5 Android ColorMatrix values consumed by the EGL video renderer. */
     fun videoFilterMatrix(id: Int, intensity: Int): FloatArray =
@@ -276,11 +313,14 @@ object Look {
         intensityMatrix(id, intensity, reduceRedChroma = false).array.copyOf()
 
     /** Render a selected look into a saved still. Effects are deliberately photo-only until a GPU video path exists. */
-    fun applyPreset(src: Bitmap, id: Int, intensity: Int): Bitmap {
-        if (id <= 0 || intensity <= 0) return src
+    fun applyPreset(
+        src: Bitmap, id: Int, intensity: Int,
+        redPercent: Int = 100, greenPercent: Int = 100, bluePercent: Int = 100
+    ): Bitmap {
+        if ((id <= 0 || intensity <= 0) && redPercent == 100 && greenPercent == 100 && bluePercent == 100) return src
         val strength = intensity.coerceIn(0, 100)
         var base = src
-        val matrix = intensityMatrix(id, intensity)
+        val matrix = intensityMatrix(id, intensity, redPercent = redPercent, greenPercent = greenPercent, bluePercent = bluePercent)
         if (id != 16) {
             val graded = PhotoGpuProcessor.applyColorMatrix(src, matrix.array) ?: run {
                 Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888).also { bitmap ->
