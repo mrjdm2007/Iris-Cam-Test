@@ -718,6 +718,9 @@ class CameraController(
             return
         }
         if (cfg.cameraId !in cameraIds) cfg.cameraId = cameraIds.firstOrNull { it == "0" } ?: cameraIds.first()
+        // A cached result from an earlier visit to this lens must not be mistaken
+        // for a fresh preview result after switching back to it.
+        latestCaptureResults.remove(cfg.cameraId)
         try {
             loadChars(cfg.cameraId)
             manager.openCamera(cfg.cameraId, object : CameraDevice.StateCallback() {
