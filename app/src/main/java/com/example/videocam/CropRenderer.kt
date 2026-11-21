@@ -142,7 +142,7 @@ class CropRenderer(
         val fs = "#extension GL_OES_EGL_image_external : require\n" +
             "precision highp float;varying vec2 vTc;uniform samplerExternalOES sTex;" +
             "uniform vec4 uR;uniform vec4 uG;uniform vec4 uB;uniform vec4 uA;uniform vec4 uOffset;" +
-            "uniform int uEffect;uniform float uStrength;uniform float uContrast;uniform vec2 uTexel;" +
+            "uniform int uEffect;uniform float uStrength;uniform float uContrast;uniform float uChromaR;uniform float uChromaG;uniform float uChromaB;uniform vec2 uTexel;" +
             "void main(){vec4 c=texture2D(sTex,vTc);" +
             "vec4 g=vec4(dot(uR,c),dot(uG,c),dot(uB,c),dot(uA,c))+uOffset;" +
             "float contrast=1.0+clamp(uContrast,0.0,1.0);" +
