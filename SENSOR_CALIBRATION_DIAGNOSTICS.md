@@ -26,4 +26,4 @@ The Alexa 35 entry is an approximation for an already-rendered phone-camera imag
 
 ## RGB chroma controls
 
-The LOOKS dialog provides independent Red, Green and Blue chroma sliders, each from 0–200%. **100% is neutral**. These change each channel's colourfulness relative to luma rather than simply increasing that channel's brightness. Values persist across app restarts and are applied to preview, saved stills, and video output; video changes update the active renderer live.
+The LOOKS dialog provides independent Red, Green and Blue chroma sliders, each from 0–200%. **100% preserves the selected look's built-in channel trim**; lower or higher values reduce or increase that channel's chroma relative to luma rather than simply changing its brightness. Values persist across app restarts and are applied to preview, saved stills, and video output; video changes update the active renderer live.
