@@ -2,17 +2,17 @@
 
 This repository is based on the successful **Iris Cam workflow #497** from 11 November 2026 (source commit `b1a6c8aec2e0c481bb7661210b3bcea2d0648af3`). The original Iris-Cam repository is not modified by this test project.
 
-## Main-sensor calibration export
+## Per-lens Camera2 metadata export
 
 1. Install the latest debug APK from the **Build APK** workflow.
-2. Select **Main 1x (camera ID 0)**.
-3. Open **Tools → Export main sensor calibration report**.
-4. Find the timestamped JSON file in `Downloads/IrisCamCalibration/`.
-5. Upload it to this repository, preferably under `calibration-reports/`.
+2. Select **Main 1x (camera ID 0)**, keep the preview on a steady, evenly lit scene for 10–15 seconds, then open **Tools → Export selected lens calibration report**.
+3. Repeat for **Wide 0.7x (camera ID 2)** and **Tele 2.7x (camera ID 3)**. Export only after each lens has been selected and its preview has settled.
+4. Find the three timestamped JSON files in `Downloads/IrisCamCalibration/`. Each filename includes the selected lens label and camera ID.
+5. Upload all three JSON files together, preferably under `calibration-reports/`.
 
-Repeat under stable daylight and indoor lighting. The report contains device/camera information, CFA arrangement, sensor dimensions, black/white levels, RAW/manual-sensor capabilities, reference illuminants, Camera2 colour/calibration/forward matrices, and the latest completed main-camera preview capture result (colour correction transform/gains, AWB state, neutral colour point and green split where available).
+Keep the phone pointed at the same stationary scene and avoid changing the lighting between exports. The wait is to allow preview capture metadata to settle; it is not a physical colour measurement. Each report contains the selected camera's device-reported sensor dimensions, CFA arrangement, black/white levels, RAW/manual-sensor capabilities, reference illuminants, Camera2 colour/calibration/forward matrices, and latest completed capture result (colour correction transform/gains, AWB state, neutral colour point and green split where available).
 
-The report is device-reported Camera2 metadata. It is not a lab spectral sensitivity measurement and does not replace colour-chart validation.
+The capture-result section is populated only after that camera has produced a completed preview result in the current app session. Missing optional keys are reported as `null`. The report is device-reported Camera2 metadata, not a lab spectral sensitivity measurement. A later validation stage needs RAW/DNG captures of the same known colour chart under controlled lighting.
 
 ## Inspired looks in this test build
 
