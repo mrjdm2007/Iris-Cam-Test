@@ -1332,6 +1332,11 @@ class CameraController(
         if (cfg.mode == 1) buildPhotoPreview() else buildRequest()
 
     fun updateRepeating() {
+        crop?.updateChroma(
+            cfg.redChromaPercent / 100f,
+            cfg.greenChromaPercent / 100f,
+            cfg.blueChromaPercent / 100f
+        )
         val s = session ?: return
         try {
             val b = currentBuilder() ?: return
