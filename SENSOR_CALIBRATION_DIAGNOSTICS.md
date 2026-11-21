@@ -1,27 +1,29 @@
-# Iris Cam sensor calibration diagnostics
+# Iris Cam Test — sensor colour research
 
-This test build includes a one-tap Camera2 metadata export for the rear main camera.
+This repository is based on the successful **Iris Cam workflow #497** from 11 November 2026 (source commit `b1a6c8aec2e0c481bb7661210b3bcea2d0648af3`). The original Iris-Cam repository is not modified by this test project.
 
-## Export from the phone
+## Main-sensor calibration export
 
-1. Install the debug APK produced by the repository's **Build APK** workflow.
-2. Open Iris Cam and select **Main 1x (camera ID 0)**.
-3. Open **Tools**.
-4. Choose **Export main sensor calibration report**.
-5. Find the JSON report in **Downloads/IrisCamCalibration/**.
-6. Upload the JSON file to this repository, preferably under `calibration-reports/`.
+1. Install the latest debug APK from the **Build APK** workflow.
+2. Select **Main 1x (camera ID 0)**.
+3. Open **Tools → Export main sensor calibration report**.
+4. Find the timestamped JSON file in `Downloads/IrisCamCalibration/`.
+5. Upload it to this repository, preferably under `calibration-reports/`.
 
-Repeat the export under different stable lighting conditions (for example daylight and indoor lighting). Each export is timestamped and stored as a separate JSON file.
+Repeat under stable daylight and indoor lighting. The report contains device/camera information, CFA arrangement, sensor dimensions, black/white levels, RAW/manual-sensor capabilities, reference illuminants, Camera2 colour/calibration/forward matrices, and the latest completed main-camera preview capture result (colour correction transform/gains, AWB state, neutral colour point and green split where available).
 
-## What is collected
+The report is device-reported Camera2 metadata. It is not a lab spectral sensitivity measurement and does not replace colour-chart validation.
 
-- Device/build information and camera ID.
-- Sensor geometry, CFA arrangement, RAW/manual-sensor capability, black/white levels and exposure/sensitivity ranges.
-- Camera2 colour, calibration and forward matrices for both reference illuminants, when the device exposes them.
-- Latest completed main-camera preview capture result: applied colour-correction transform and gains, AWB mode/state, neutral colour point, exposure, ISO, dynamic black/white levels and Bayer green-split estimate, when available.
+## Inspired looks in this test build
 
-## Important limitations
+The Inspired group contains only:
+- Sony S-Cinetone (inspired)
+- Nikon Natural Colour (inspired)
+- Panasonic Lumix Cinelike D (inspired)
+- ARRI Alexa 35 (inspired)
 
-This is a metadata report, not a lab measurement of spectral sensitivity and not a colour-chart measurement. Optional Camera2 keys may legitimately be absent or null. The live result is a snapshot of the latest completed preview frame, so repeat exports under different lighting to collect different AWB/neutral-point conditions.
+The Alexa 35 entry is an approximation for an already-rendered phone-camera image, not an official ARRI LogC4-to-Rec.709 transform or an exact camera match. Accurate sensor-specific tuning requires the exported metadata plus controlled reference-chart captures.
 
-The report does not change camera settings, apply colour correction, or upload anything automatically. The user chooses when and where to upload the JSON file.
+## RGB chroma controls
+
+The LOOKS dialog provides independent Red, Green and Blue chroma sliders, each from 0–200%. **100% is neutral**. These change each channel's colourfulness relative to luma rather than simply increasing that channel's brightness. Values persist across app restarts and are applied to preview, saved stills, and video output; video changes update the active renderer live.
