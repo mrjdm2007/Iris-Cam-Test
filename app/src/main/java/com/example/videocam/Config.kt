@@ -96,6 +96,9 @@ data class Config(
     var filterId: Int = 27,          // default Sony S-Cinetone-inspired colour profile; 0 = Natural
     var filterIntensity: Int = 100,  // default video look strength, 0..100
     var photoFilterIntensity: Int = 100, // default photo look strength, 0..100
+    var redChromaPercent: Int = 100, // relative red chroma, 100 = neutral
+    var greenChromaPercent: Int = 100, // relative green chroma, 100 = neutral
+    var blueChromaPercent: Int = 100, // relative blue chroma, 100 = neutral
     var photoContrast: Int = 10, // default contrast strength for every lens, 0..100
     var photoContrastByLens: MutableMap<String, Int> = mutableMapOf(), // per-camera photo contrast
     var videoContrast: Int = 10, // legacy fallback for video contrast, 0..100
@@ -164,6 +167,9 @@ data class Config(
         filterId = o.filterId
         filterIntensity = o.filterIntensity
         photoFilterIntensity = o.photoFilterIntensity
+        redChromaPercent = o.redChromaPercent
+        greenChromaPercent = o.greenChromaPercent
+        blueChromaPercent = o.blueChromaPercent
         photoContrast = o.photoContrast
         photoContrastByLens = o.photoContrastByLens.toMutableMap()
         videoContrast = o.videoContrast
@@ -233,6 +239,9 @@ data class Config(
         .put("filterId", filterId)
         .put("filterIntensity", filterIntensity)
         .put("photoFilterIntensity", photoFilterIntensity)
+        .put("redChromaPercent", redChromaPercent.coerceIn(0, 200))
+        .put("greenChromaPercent", greenChromaPercent.coerceIn(0, 200))
+        .put("blueChromaPercent", blueChromaPercent.coerceIn(0, 200))
         .put("photoContrast", photoContrast)
         .put("photoContrastByLens", JSONObject().apply { photoContrastByLens.forEach { (lens, value) -> put(lens, value.coerceIn(0, 100)) } })
         .put("videoContrast", videoContrast.coerceIn(0, 100))
@@ -349,6 +358,9 @@ data class Config(
                 filterId = finalFilterId,
                 filterIntensity = finalVideoIntensity,
                 photoFilterIntensity = finalPhotoIntensity,
+                redChromaPercent = o.optInt("redChromaPercent", d.redChromaPercent).coerceIn(0, 200),
+                greenChromaPercent = o.optInt("greenChromaPercent", d.greenChromaPercent).coerceIn(0, 200),
+                blueChromaPercent = o.optInt("blueChromaPercent", d.blueChromaPercent).coerceIn(0, 200),
                 photoContrast = (if (oldVersion < 7 && o.optInt("photoContrast", 40) == 40) 10 else o.optInt("photoContrast", d.photoContrast)).coerceIn(0, 100),
                 photoContrastByLens = lensContrast,
                 videoContrast = o.optInt("videoContrast", d.videoContrast).coerceIn(0, 100),
