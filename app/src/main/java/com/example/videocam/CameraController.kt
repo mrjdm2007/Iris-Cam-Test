@@ -306,7 +306,6 @@ class CameraController(
             .put("maxFrameDurationNs", c.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: JSONObject.NULL)
             .put("timestampSource", c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ?: JSONObject.NULL)
             .put("lensShadingApplied", c.get(CameraCharacteristics.SENSOR_INFO_LENS_SHADING_APPLIED) ?: JSONObject.NULL)
-            .put("baseGainFactor", c.get(CameraCharacteristics.SENSOR_BASE_GAIN_FACTOR)?.let { it.toString() } ?: JSONObject.NULL)
             .put("maxAnalogSensitivity", c.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY) ?: JSONObject.NULL)
             .put("referenceIlluminant1", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1) ?: JSONObject.NULL)
             .put("referenceIlluminant2", c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2) ?: JSONObject.NULL)
@@ -332,7 +331,7 @@ class CameraController(
             live.put("colorCorrectionMode", result.get(CaptureResult.COLOR_CORRECTION_MODE) ?: JSONObject.NULL)
             live.put("colorCorrectionTransform", transformJson(result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)) ?: JSONObject.NULL)
             live.put("colorCorrectionGains", result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let {
-                JSONArray().put(it.red).put(it.greenEven).put(it.greenOdd).put(it.blue)
+                JSONArray().put(it.getRed()).put(it.getGreenEven()).put(it.getGreenOdd()).put(it.getBlue())
             } ?: JSONObject.NULL)
             live.put("awbMode", result.get(CaptureResult.CONTROL_AWB_MODE) ?: JSONObject.NULL)
             live.put("awbState", result.get(CaptureResult.CONTROL_AWB_STATE) ?: JSONObject.NULL)
