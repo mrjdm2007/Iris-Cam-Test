@@ -369,7 +369,7 @@ class CameraController(
     private fun transformJson(transform: ColorSpaceTransform?): JSONArray? {
         if (transform == null) return null
         val elements = Array(9) { android.util.Rational(0, 1) }
-        transform.copyElements(elements)
+        transform.copyElements(elements, 0)
         return JSONArray().apply {
             elements.forEach { value ->
                 put(JSONObject()
