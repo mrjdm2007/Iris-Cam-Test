@@ -306,7 +306,7 @@ class CameraController(
             .put("maxFrameDurationNs", c.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: JSONObject.NULL)
             .put("timestampSource", c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ?: JSONObject.NULL)
             .put("lensShadingApplied", c.get(CameraCharacteristics.SENSOR_INFO_LENS_SHADING_APPLIED) ?: JSONObject.NULL)
-            .put("baseGainFactor", c.get(CameraCharacteristics.SENSOR_INFO_BASE_GAIN_FACTOR)?.let { it.toString() } ?: JSONObject.NULL)
+            .put("baseGainFactor", c.get(CameraCharacteristics.SENSOR_BASE_GAIN_FACTOR)?.let { it.toString() } ?: JSONObject.NULL)
             .put("maxAnalogSensitivity", c.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY) ?: JSONObject.NULL)
             .put("rawCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW))
             .put("manualSensorCapability", caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
@@ -335,8 +335,12 @@ class CameraController(
             live.put("awbMode", result.get(CaptureResult.CONTROL_AWB_MODE) ?: JSONObject.NULL)
             live.put("awbState", result.get(CaptureResult.CONTROL_AWB_STATE) ?: JSONObject.NULL)
             live.put("neutralColorPoint", result.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)?.let {
-                JSONArray().put(it.red).put(it.greenEven).put(it.greenOdd).put(it.blue)
+                rationalArrayJson(it)
             } ?: JSONObject.NULL)
+            live.put("dynamicBlackLevel", result.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)?.let {
+                JSONArray().apply { it.forEach { value -> put(value.toDouble()) } }
+            } ?: JSONObject.NULL)
+            live.put("dynamicWhiteLevel", result.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL) ?: JSONObject.NULL)
             live.put("greenSplit", result.get(CaptureResult.SENSOR_GREEN_SPLIT) ?: JSONObject.NULL)
         }
         root.put("latestCaptureResult", live)
@@ -349,6 +353,16 @@ class CameraController(
 
     private fun jsonFloatArray(values: FloatArray?): JSONArray =
         JSONArray().apply { values?.forEach { put(it.toDouble()) } }
+
+    private fun rationalArrayJson(values: Array<android.util.Rational>): JSONArray =
+        JSONArray().apply {
+            values.forEach { value ->
+                put(JSONObject()
+                    .put("numerator", value.numerator)
+                    .put("denominator", value.denominator)
+                    .put("value", value.numerator.toDouble() / value.denominator.toDouble()))
+            }
+        }
 
     private fun transformJson(transform: ColorSpaceTransform?): JSONArray? {
         if (transform == null) return null
